@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 
-# This process may take 5 hours depending on your internet connection.
-
 MAX_LEN=500
 MIN_COUNT=5
 vocab_size=50000
-relation_freq_threshold=1000
 
 if [ ! -f ${BIORE_DATA_ROOT}/alignment_CTD_PTC.pubtator ]; then
     echo "create alignment between CTD and PubTator Central"
@@ -20,7 +17,7 @@ fi
 
 if [ ! -f ${BIORE_DATA_ROOT}/alignment_CTD_PTC.merge_rel.pubtator ]; then
     echo "prune chemical-gene relation types"
-    python src/build_data/merge_ctd_relation_type.py ${BIORE_DATA_ROOT}/alignment_CTD_PTC.pubtator ${BIORE_DATA_ROOT}/alignment_CTD_PTC.merge_rel.pubtator $relation_freq_threshold
+    python src/build_data/merge_ctd_relation_type.py ${BIORE_DATA_ROOT}/alignment_CTD_PTC.pubtator ${BIORE_DATA_ROOT}/alignment_CTD_PTC.merge_rel.pubtator
 fi
 
 if [ ! -f ${BIORE_DATA_ROOT}/alignment_CTD_PTC.NULL.pubtator ]; then
@@ -28,9 +25,8 @@ if [ ! -f ${BIORE_DATA_ROOT}/alignment_CTD_PTC.NULL.pubtator ]; then
     python src/build_data/generate_NULL_abstract.py
 fi
 
-if [ ! -f ${BIORE_DATA_ROOT}/train.txt ]; then
-    echo "split data into train dev test"
-    python src/build_data/create_data_split.py
-fi
+
+echo "split data into train dev test"
+c
 
 echo "build BPE tokenization with vocab_size"

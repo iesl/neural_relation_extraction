@@ -1,6 +1,7 @@
 import time
 import os
 import logging
+
 from transformers import AutoTokenizer, AutoModel
 
 from module.data_loader import Dataloader

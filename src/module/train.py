@@ -3,6 +3,7 @@ import torch
 import os, sys
 import json
 from tqdm import tqdm
+import wandb
 from sklearn import metrics
 from scipy.special import logsumexp
 from module.utils import log1mexp
@@ -57,6 +58,10 @@ class Trainer(object):
         
 
     def train(self):
+        if self.config["wandb"]:
+            wandb.init(project="re")
+            wandb.config.update(self.config, allow_val_change=True)
+
         self.logger.debug("This is training")
         #inputs = tokenizer("Hello world!", return_tensors="pt")
         #outputs = self.model(**inputs)
@@ -120,6 +125,8 @@ class Trainer(object):
             # print training loss 
             if i % 100 < self.config["train_batch_size"]:
                 self.logger.info(f"{i}-th {i%100} loss: {np.mean(rolling_loss)}")
+                if self.config["wandb"]:
+                    wandb.log({'iteration': i, 'loss': np.mean(rolling_loss)})
                 if i < self.config["warmup"]:
                     self.logger.info(f"{i}-th {i%100} lr = {self.config['learning_rate'] * float(i) / self.config['warmup']}")
                 rolling_loss = []
@@ -127,7 +134,9 @@ class Trainer(object):
             # evaluate on dev set
             if i % self.config["log_interval"] <= self.config["train_batch_size"]:
                 macro_perf, micro_perf, per_rel_perf = self.test(test=False) # per_rel_perf is a list of length of (number of relation types + 1)
-                
+                if self.config["wandb"]:
+                    wandb.log({'Micro F1 dev': micro_perf["F"], "Micro P dev": micro_perf["P"], "Micro R dev": micro_perf["R"]})
+                    wandb.log({'Macro F1 dev': macro_perf["F"], "Macro P dev": macro_perf["P"], "Macro R dev": macro_perf["R"]})
                 if micro_perf["F"] > best_metric or i == self.config["train_batch_size"]:
                     best_metric = micro_perf["F"]
                     self.logger.info(f"{i * 100 / len(self.data)} % DEV (a new best): Macro Precision={macro_perf['P']}, Macro Recall={macro_perf['R']}, Macro F1 (a new best) ={macro_perf['F']}")
@@ -155,10 +164,17 @@ class Trainer(object):
         # load best model
         best_metric_threshold = self.load_model()
         macro_perf, micro_perf, per_rel_perf = self.test(test=True, best_metric_threshold=best_metric_threshold)
+        if self.config["wandb"]:
+            wandb.log({'Micro F1 test': micro_perf["F"], "Micro P test": micro_perf["P"], "Micro R test": micro_perf["R"]})
+            wandb.log({'Macro F1 test': macro_perf["F"], "Macro P test": macro_perf["P"], "Macro R test": macro_perf["R"]})
         self.logger.info(f"Test: Macro Precision={macro_perf['P']}, Macro Recall={macro_perf['R']}, Macro F1={macro_perf['F']}")
         self.logger.info(f"Test: Micro Precision={micro_perf['P']}, Micro Recall={micro_perf['R']}, Micro F1={micro_perf['F']}")
         for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
             self.logger.info(f"TEST: {rel_name}, Precision={pp}, Recall={rr}, F1={ff}, threshold={tt}")
+            
+        
+        if self.config["wandb"]:
+            wandb.finish()
 
     
 

@@ -48,13 +48,14 @@ class BiaffineNetwork(nn.Module):
         self.config = config
         self.encoder = AutoModel.from_pretrained(config["encoder_type"])
         self.D = self.encoder.config.hidden_size
+        self.dim = config["dim"]
         self.num_rel = len(json.loads(open(config["data_path"] + "/relation_map.json").read()))# + 1
         self.head_layer0 = torch.nn.Linear(self.D, self.D)
-        self.head_layer1 = torch.nn.Linear(self.D, self.D)
+        self.head_layer1 = torch.nn.Linear(self.D, self.dim)
         self.tail_layer0 = torch.nn.Linear(self.D, self.D)
-        self.tail_layer1 = torch.nn.Linear(self.D, self.D)
+        self.tail_layer1 = torch.nn.Linear(self.D, self.dim)
         self.relu = torch.nn.ReLU()
-        mat = orthonormal_initializer(self.D, self.D)[:,None,:]
+        mat = orthonormal_initializer(self.dim, self.dim)[:,None,:]
         biaffine_mat = np.concatenate([mat]*self.num_rel, axis=1)
         self.biaffine_mat = torch.nn.Parameter(torch.tensor(biaffine_mat), requires_grad=True) # (D, R, D)
 
@@ -107,9 +108,10 @@ class ConcatNonLinear(nn.Module):
         self.config = config
         self.encoder = AutoModel.from_pretrained(config["encoder_type"])
         self.D = self.encoder.config.hidden_size
+        self.dim = config["dim"]
         self.num_rel = len(json.loads(open(config["data_path"] + "/relation_map.json").read()))# + 1
-        self.layer1 = torch.nn.Linear(self.D * 2, self.D)
-        self.layer2 = torch.nn.Linear(self.D, self.num_rel)
+        self.layer1 = torch.nn.Linear(self.D * 2, self.dim)
+        self.layer2 = torch.nn.Linear(self.dim, self.num_rel)
         self.relu = torch.nn.ReLU()
         
     def forward(self, input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator):
@@ -135,13 +137,14 @@ class Box(nn.Module):
         self.config = config
         self.encoder = AutoModel.from_pretrained(config["encoder_type"])
         self.D = self.encoder.config.hidden_size
+        self.dim = config["dim"]
         self.num_rel = len(json.loads(open(config["data_path"] + "/relation_map.json").read()))
         self.layer1 = torch.nn.Linear(self.D * 2, self.D * 2)
-        self.layer2 = torch.nn.Linear(self.D * 2, self.D * 2)
+        self.layer2 = torch.nn.Linear(self.D * 2, self.dim * 2)
         self.relu = torch.nn.ReLU()
 
-        self.rel_center = torch.nn.Parameter(torch.rand(self.num_rel, self.D) * 0.2 - 0.1, requires_grad=True)
-        self.rel_sl = torch.nn.Parameter(torch.zeros(self.num_rel, self.D), requires_grad=True)
+        self.rel_center = torch.nn.Parameter(torch.rand(self.num_rel, self.dim) * 0.2 - 0.1, requires_grad=True)
+        self.rel_sl = torch.nn.Parameter(torch.zeros(self.num_rel, self.dim), requires_grad=True)
         self.volume_temp = config["volume_temp"]
         self.intersection_temp = config["intersection_temp"]
         self.softplus = torch.nn.Softplus(beta=1 / self.volume_temp)
@@ -192,8 +195,7 @@ class Box(nn.Module):
 
 
         input_boxes = self.layer2(self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1)))) # (batchsize, 2*D)
-        input_center = input_boxes[:, :self.D]
-        input_z, input_Z = self.param2minmax(input_boxes[:, :self.D], input_boxes[:, self.D:]) # (batchsize, D), (batchsize, D)
+        input_z, input_Z = self.param2minmax(input_boxes[:, :self.dim], input_boxes[:, self.dim:]) # (batchsize, D), (batchsize, D)
         input_z, input_Z = input_z[:, None, :].repeat(1, self.num_rel, 1), input_Z[:, None, :].repeat(1, self.num_rel, 1) # (batchsize, R, D), (batchsize, R, D)
         rel_z, rel_Z = self.param2minmax(self.rel_center, self.rel_sl) # (R, D), (R, D)
         rel_z, rel_Z = rel_z[None, :, :].repeat(batchsize, 1, 1), rel_Z[None, :, :].repeat(batchsize, 1, 1) # (batchsize, R, D), (batchsize, R, D)
