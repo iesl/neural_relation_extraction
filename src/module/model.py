@@ -1,13 +1,17 @@
 import numpy as np
+import json
 import torch
 import torch.nn as nn
+
 from transformers import AutoModel
 
 from module.neural import TransformerInterEncoder
 from module.neural import RNNEncoder
 
 __all__ = [
-    "BRAN",
+    "BiaffineNetwork",
+    "ConcatNonLinear",
+    "Box",
 ]
 
 
@@ -38,13 +42,13 @@ def orthonormal_initializer(input_size, output_size):
     return Q.astype(np.float32)
 
 
-class BRAN(nn.Module):
+class BiaffineNetwork(nn.Module):
     def __init__(self, config):
-        super(BRAN, self).__init__()
+        super(BiaffineNetwork, self).__init__()
         self.config = config
         self.encoder = AutoModel.from_pretrained(config["encoder_type"])
-        self.D = 768
-        self.num_rel = 14
+        self.D = self.encoder.config.hidden_size
+        self.num_rel = len(json.loads(open(config["data_path"] + "/relation_map.json").read()))# + 1
         self.head_layer0 = torch.nn.Linear(self.D, self.D)
         self.head_layer1 = torch.nn.Linear(self.D, self.D)
         self.tail_layer0 = torch.nn.Linear(self.D, self.D)
@@ -75,16 +79,18 @@ class BRAN(nn.Module):
         output = torch.transpose(output, 2, 3)
         return output
         
-    def forward(self, input_ids, token_type_ids, attention_mask, ep_mask):
+    def forward(self, input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator):
         # input_ids: (batchsize, text_length)
         # subj_indicators: (batchsize, text_length)
         # obj_indicators: (batchsize, text_length)
         # ep_mask: (batchsize, text_length, text_length)
+        # e1_indicator: not used
+        # e2_indicator: not used
         batchsize, text_length = input_ids.shape
         h = self.encoder(input_ids=input_ids.long(), token_type_ids=token_type_ids.long(), attention_mask=attention_mask.long())[0] # (batchsize, text_length, D)
         
-        e1_vec = self.head_layer0(self.relu(self.head_layer0(h)))
-        e2_vec = self.tail_layer1(self.relu(self.tail_layer1(h)))
+        e1_vec = self.head_layer1(self.relu(self.head_layer0(h)))
+        e2_vec = self.tail_layer1(self.relu(self.tail_layer0(h)))
 
 
         pairwise_scores = self.bi_affine(e1_vec, e2_vec) # (batchsize, text_length, text_length, R)
@@ -93,3 +99,110 @@ class BRAN(nn.Module):
         pairwise_scores = pairwise_scores + ep_mask.unsqueeze(3) # batchsize, text_length, text_length, R
         pairwise_scores = torch.logsumexp(pairwise_scores, dim=[1,2]) # batchsize, R
         return pairwise_scores
+
+
+class ConcatNonLinear(nn.Module):
+    def __init__(self, config):
+        super(ConcatNonLinear, self).__init__()
+        self.config = config
+        self.encoder = AutoModel.from_pretrained(config["encoder_type"])
+        self.D = self.encoder.config.hidden_size
+        self.num_rel = len(json.loads(open(config["data_path"] + "/relation_map.json").read()))# + 1
+        self.layer1 = torch.nn.Linear(self.D * 2, self.D)
+        self.layer2 = torch.nn.Linear(self.D, self.num_rel)
+        self.relu = torch.nn.ReLU()
+        
+    def forward(self, input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator):
+        # input_ids: (batchsize, text_length)
+        # subj_indicators: (batchsize, text_length)
+        # obj_indicators: (batchsize, text_length)
+        # ep_mask: not used
+        # e1_indicator: (batchsize, text_length)
+        # e2_indicator: (batchsize, text_length)
+        batchsize, text_length = input_ids.shape
+        h = self.encoder(input_ids=input_ids.long(), token_type_ids=token_type_ids.long(), attention_mask=attention_mask.long())[0] # (batchsize, text_length, D)
+        
+        e1_vec = (h * e1_indicator[:,:,None]).max(1)[0] # (batchsize, D)
+        e2_vec = (h * e2_indicator[:,:,None]).max(1)[0] # (batchsize, D)
+        pairwise_scores = self.layer2(self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1)))) # (batchsize, R)
+
+        return pairwise_scores
+
+
+class Box(nn.Module):
+    def __init__(self, config):
+        super(Box, self).__init__()
+        self.config = config
+        self.encoder = AutoModel.from_pretrained(config["encoder_type"])
+        self.D = self.encoder.config.hidden_size
+        self.num_rel = len(json.loads(open(config["data_path"] + "/relation_map.json").read()))
+        self.layer1 = torch.nn.Linear(self.D * 2, self.D * 2)
+        self.layer2 = torch.nn.Linear(self.D * 2, self.D * 2)
+        self.relu = torch.nn.ReLU()
+
+        self.rel_center = torch.nn.Parameter(torch.rand(self.num_rel, self.D) * 0.2 - 0.1, requires_grad=True)
+        self.rel_sl = torch.nn.Parameter(torch.zeros(self.num_rel, self.D), requires_grad=True)
+        self.volume_temp = config["volume_temp"]
+        self.intersection_temp = config["intersection_temp"]
+        self.softplus = torch.nn.Softplus(beta=1 / self.volume_temp)
+        self.softplus_const = 2 * self.intersection_temp * 0.57721566490153286060
+        
+    def log_volume(self, z, Z):
+        log_vol = torch.sum(
+            torch.log(self.softplus(Z - z - self.softplus_const)),
+            dim=-1,
+        )
+        return log_vol
+
+    def param2minmax(self, center, length):
+        length_ = self.softplus(length)
+        z = center - length_
+        Z = center + length_
+        return z, Z
+
+    def gumbel_intersection(self, e1_min, e1_max, e2_min, e2_max):
+        meet_min = self.intersection_temp * torch.logsumexp(
+            torch.stack(
+                [e1_min / self.intersection_temp, e2_min / self.intersection_temp]
+            ),
+            0,
+        )
+        meet_max = -self.intersection_temp * torch.logsumexp(
+            torch.stack(
+                [-e1_max / self.intersection_temp, -e2_max / self.intersection_temp]
+            ),
+            0,
+        )
+        meet_min = torch.max(meet_min, torch.max(e1_min, e2_min))
+        meet_max = torch.min(meet_max, torch.min(e1_max, e2_max))
+        return meet_min, meet_max
+
+    def forward(self, input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator):
+        # input_ids: (batchsize, text_length)
+        # subj_indicators: (batchsize, text_length)
+        # obj_indicators: (batchsize, text_length)
+        # ep_mask: not used
+        # e1_indicator: (batchsize, text_length)
+        # e2_indicator: (batchsize, text_length)
+        batchsize, text_length = input_ids.shape
+        h = self.encoder(input_ids=input_ids.long(), token_type_ids=token_type_ids.long(), attention_mask=attention_mask.long())[0] # (batchsize, text_length, D)
+        
+        e1_vec = (h * e1_indicator[:,:,None]).max(1)[0] # (batchsize, D)
+        e2_vec = (h * e2_indicator[:,:,None]).max(1)[0] # (batchsize, D)
+
+
+        input_boxes = self.layer2(self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1)))) # (batchsize, 2*D)
+        input_center = input_boxes[:, :self.D]
+        input_z, input_Z = self.param2minmax(input_boxes[:, :self.D], input_boxes[:, self.D:]) # (batchsize, D), (batchsize, D)
+        input_z, input_Z = input_z[:, None, :].repeat(1, self.num_rel, 1), input_Z[:, None, :].repeat(1, self.num_rel, 1) # (batchsize, R, D), (batchsize, R, D)
+        rel_z, rel_Z = self.param2minmax(self.rel_center, self.rel_sl) # (R, D), (R, D)
+        rel_z, rel_Z = rel_z[None, :, :].repeat(batchsize, 1, 1), rel_Z[None, :, :].repeat(batchsize, 1, 1) # (batchsize, R, D), (batchsize, R, D)
+
+        meet_z, meet_Z = self.gumbel_intersection(input_z, input_Z, rel_z, rel_Z) # (batchsize, R, D), (batchsize, R, D)
+
+        log_overlap_volume = self.log_volume(meet_z, meet_Z) # (batchsize, R)
+        log_rhs_volume = self.log_volume(input_z, input_Z) # (batchsize, R)
+
+        logprobs = log_overlap_volume - log_rhs_volume 
+        return logprobs
+    
