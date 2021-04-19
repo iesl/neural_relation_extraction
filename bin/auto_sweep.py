@@ -28,12 +28,10 @@ def config_generation(model_type, path, task, data_format):
             "--data_path=" + path,
             task,
             data_format,
-            "--encoder_type=bert-large-cased",
+            "--encoder_type=roberta-large",
             "--score_func=" + model_type,
-            "--max_text_length=128",
-            "--train_batch_size=4",
+            "--train_batch_size=2",
             "--test_batch_size=16",
-            "--warmup=0.0",
             "--patience=5",
             "--log_interval=0.25",
             "--epochs=50",
@@ -42,8 +40,11 @@ def config_generation(model_type, path, task, data_format):
         "method": "bayes",
         "metric": {"goal": "maximize", "name": "Micro F1 dev"},
         "parameters": {
-            "learning_rate": {"distribution": "log_uniform", "min": -13.8, "max": -6.9}, # 1e-6 ~ 1e-3
+            "learning_rate": {"distribution": "log_uniform", "min": -16.0, "max": -7.0}, # 1e-7 ~ 1e-3
+            "warmup": {"distribution": "uniform", "min": 0.0, "max": 1.0},
             "dim": {"values": [256, 512, 768, 1024]},
+            "max_text_length": {"values": [32, 64, 128, 256]},
+            "weight_decay":{"distribution": "log_uniform", "min": -18.4, "max": -2.3}, # 1e-8 ~ 1e-1
         },
     }
 
@@ -83,8 +84,8 @@ if __name__ == "__main__":
     parser.add_argument("--partition", type=str, default="1080ti-long")
     parser.add_argument("--username", type=str, default="dongxuzhang")
     parser.add_argument("--max_run", type=int, default=50)
-    parser.add_argument("--num_machine", type=int, default=10)
-    parser.add_argument("--memory_per_run", type=int, default=25000)
+    parser.add_argument("--num_machine", type=int, default=20)
+    parser.add_argument("--memory_per_run", type=int, default=30000)
 
     parser.add_argument("--data_path", type=str, default="data/tacred/")
     parser.add_argument("--model_type", type=str, default="box")

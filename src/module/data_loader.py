@@ -100,6 +100,7 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
     # [CLS] --> 101, [PAD] --> 0, [SEP] --> 102, [UNK] --> 100
     
     text_tokenized =tokenizer.tokenize(text)[:max_text_length]
+    
     text_wid = tokenizer.convert_tokens_to_ids(text_tokenized)
 
     padid = tokenizer.pad_token_id

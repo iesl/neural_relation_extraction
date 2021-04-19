@@ -1,6 +1,7 @@
 import time
 import os
 import logging
+import json
 
 from transformers import AutoTokenizer, AutoModel
 
@@ -27,6 +28,8 @@ def setup(config):
                                     "bz_" + str(config["train_batch_size"]),
                                     "length_" + str(config["max_text_length"]),
                                     "lr_" + str(config["learning_rate"]),
+                                    "decay_" + str(config["weight_decay"]),
+                                    "dim_" + str(config["dim"]),
                                     "volt_" + str(config["volume_temp"]),
                                     "intt_" + str(config["intersection_temp"]),
                                     "epochs_" + str(config["epochs"]),
@@ -36,7 +39,7 @@ def setup(config):
                                     "seed_" + str(config["seed"])
                                     ])
         config["data_path"] = config["data_path"].rstrip("/")
-        config["output_path"] = os.path.join(os.environ['BIORE_ROOT'], "saved_models", 
+        config["output_path"] = os.path.join(os.environ['BIORE_OUTPUT_ROOT'], "saved_models", 
                                     os.path.basename(config["data_path"]), 
                                     base_dir_name)
 
@@ -60,9 +63,19 @@ def setup(config):
 
 
     device = cuda_if_available(use_cuda=config["cuda"])
+    lowercase = True if "uncased" in config["encoder_type"] else False
 
-    # setup model
+    # setup tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config["encoder_type"], use_fast=True)
+    
+    # add entity marker token into vocab
+    if os.path.exists(config["data_path"] + "/entity_type_markers.json"):
+        entity_marker_tokens = json.loads(open(config["data_path"] + "/entity_type_markers.json").read())
+        if lowercase == True:
+            entity_marker_tokens = [t.lower() for t in entity_marker_tokens]
+        tokenizer.add_tokens(entity_marker_tokens)
+    
+    # setup model
     if config["score_func"] == "biaffine":
         model = BiaffineNetwork(config)
     elif config["score_func"] == "nn":
@@ -70,11 +83,12 @@ def setup(config):
     elif config["score_func"] == "box":
         model = Box(config)
     model.to(device)
+    model.encoder.resize_token_embeddings(len(tokenizer)) # create token embedding for new added markers
     
 
     # setup data
     time1 = time.time()
-    lowercase = True if "uncased" in config["encoder_type"] else False
+    
 
     data = Dataloader(config["data_path"], tokenizer, batchsize=config["train_batch_size"], shuffle=True, 
                       seed=config["seed"], max_text_length=config["max_text_length"], training=config["train"],

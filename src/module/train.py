@@ -24,8 +24,8 @@ class Trainer(object):
         self.config = config
         self.device = device
         # setup optimizer
-        self.opt = torch.optim.Adam(
-            self.model.parameters(), lr=config["learning_rate"], weight_decay=0.0
+        self.opt = torch.optim.AdamW(
+            self.model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"]
         )
         
         #for name, param in self.model.named_parameters():
@@ -72,7 +72,8 @@ class Trainer(object):
         elif self.config["multi_label"] == False and self.config["score_func"] != "box":
             loss_func = torch.nn.CrossEntropyLoss()
         elif self.config["multi_label"] == False and self.config["score_func"] == "box":
-            raise ValueError(f"box model currently only works when multi_label == True")
+            loss_func = torch.nn.CrossEntropyLoss()
+            #raise ValueError(f"box model currently only works when multi_label == True")
 
         best_metric = 0
         best_metric_threshold = {}
@@ -93,13 +94,13 @@ class Trainer(object):
             e1_indicator = e1_indicator.to(self.device)
             e2_indicator = e2_indicator.to(self.device)
             #self.logger.debug(input_ids.shape, token_type_ids.shape, attention_mask.shape, ep_mask.shape)
-            scores = self.model(input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator) # (batchsize, R)
+            scores = self.model(input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator) # (batchsize, R) or (batchsize, R+1)
             if self.config["multi_label"] == True:
                 loss = loss_func(scores, label_array.to(self.device))
             else: 
-                scores = torch.cat([scores, -scores.logsumexp(1, keepdim=True)], dim=1) # (batchsize, R+1)
+                #scores = torch.cat([scores, -scores.logsumexp(1, keepdim=True)], dim=1) # (batchsize, R+1)
                 #scores = torch.cat([scores, -scores.max(1, keepdim=True)[0]], dim=1) # (batchsize, R+1)
-                label_array = torch.cat([label_array, 1 - label_array.sum(1, keepdim=True)], dim=1) # (batchsize, R+1)
+                label_array = torch.cat([label_array, 1 - (label_array.sum(1, keepdim=True) > 0).float()], dim=1) # (batchsize, R+1)
                 #print(label_array)
                 #sys.stdout.flush()
                 label_array = label_array.argmax(1) # (batchsize,)
@@ -115,6 +116,7 @@ class Trainer(object):
             
             # linear warmup 
             if self.config["warmup"] > 0 and i < self.config["warmup"]:
+                #print(float(i) / self.config["warmup"])
                 for p in self.opt.param_groups:
                     p['lr'] = self.config["learning_rate"] * float(i) / self.config["warmup"]
 
@@ -134,10 +136,11 @@ class Trainer(object):
             # evaluate on dev set
             if i % self.config["log_interval"] <= self.config["train_batch_size"]:
                 macro_perf, micro_perf, per_rel_perf = self.test(test=False) # per_rel_perf is a list of length of (number of relation types + 1)
-                if self.config["wandb"]:
-                    wandb.log({'Micro F1 dev': micro_perf["F"], "Micro P dev": micro_perf["P"], "Micro R dev": micro_perf["R"]})
-                    wandb.log({'Macro F1 dev': macro_perf["F"], "Macro P dev": macro_perf["P"], "Macro R dev": macro_perf["R"]})
+                
                 if micro_perf["F"] > best_metric or i == self.config["train_batch_size"]:
+                    if self.config["wandb"]:
+                        wandb.log({'Micro F1 dev': micro_perf["F"], "Micro P dev": micro_perf["P"], "Micro R dev": micro_perf["R"]})
+                        wandb.log({'Macro F1 dev': macro_perf["F"], "Macro P dev": macro_perf["P"], "Macro R dev": macro_perf["R"]})
                     best_metric = micro_perf["F"]
                     self.logger.info(f"{i * 100 / len(self.data)} % DEV (a new best): Macro Precision={macro_perf['P']}, Macro Recall={macro_perf['R']}, Macro F1 (a new best) ={macro_perf['F']}")
                     self.logger.info(f"{i * 100 / len(self.data)} % DEV (a new best): Micro Precision={micro_perf['P']}, Micro Recall={micro_perf['R']}, Micro F1 (a new best) ={micro_perf['F']}")
@@ -203,8 +206,11 @@ class Trainer(object):
         
         # getting scores for all valid/test data
         with torch.no_grad():
-            #scores = np.zeros((len(data), len(self.data.relation_map) + 1)) # (num_test, R + 1)
-            scores = np.zeros((len(data), len(self.data.relation_map))) # (num_test, R)
+            if self.config["multi_label"] == True:
+                scores = np.zeros((len(data), len(self.data.relation_map))) # (num_test, R)
+            else: 
+                scores = np.zeros((len(data), len(self.data.relation_map)+1)) # (num_test, R + 1)
+
             labels = np.zeros((len(data), len(self.data.relation_map))) # (num_test, R)
             self.logger.debug(f"length of data: {len(data)}")
             input_array, pad_array, label_array, e1_indicators, e2_indicators, docid, e1id, e2id = [], [], [], [], [], [], [], []
@@ -234,7 +240,7 @@ class Trainer(object):
                     ep_mask = torch.tensor(ep_mask, dtype=torch.float).to(self.device)
                     
                     
-                    score = self.model(input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator).detach().cpu().numpy() # (b, R)
+                    score = self.model(input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator).detach().cpu().numpy() # (b, R) or (b, R+1)
                     #print(input_ids.shape, ep_mask.shape, score.shape, i+1-len(input_array), i+1, len(labels))
                     sys.stdout.flush()
 
@@ -247,13 +253,13 @@ class Trainer(object):
                         if self.config["multi_label"] == True:
                             prediction = (score > threshold_vec) # (b, R)
                         else: 
-                            score = np.concatenate([score, -logsumexp(score, axis=1)[:, None]], axis=1) # (batchsize, R+1)
+                            #score = np.concatenate([score, -logsumexp(score, axis=1)[:, None]], axis=1) # (batchsize, R+1)
                             #score = np.concatenate([score, -np.max(score, axis=1)[:, None]], axis=1) # (batchsize, R+1)
                             # if multi_class, choose argmax when the model predicts multiple labels 
                             prediction = np.zeros_like(score) # (num_test, R + 1)
                             # predictions[np.arange(scores.shape[0]), np.argmax((scores > threshold_vec) * (scores + 1e10), 1)] = 1
                             prediction[np.arange(score.shape[0]), np.argmax(score, 1)] = 1
-                            prediction = prediction[:, :-1] # (batchsize, R)
+                            prediction = prediction[:, :-1] # (batchsize, R), become NA if all-zero
 
                         for j in range(len(input_array)):
                             predict_names = []
@@ -353,7 +359,7 @@ class Trainer(object):
             if self.config["multi_label"] == True:
                 predictions = (scores > threshold_vec) # (num_test, R)
             else:
-                scores = np.concatenate([scores, -logsumexp(scores, axis=1)[:, None]], axis=1) # (batchsize, R+1)
+                #scores = np.concatenate([scores, -logsumexp(scores, axis=1)[:, None]], axis=1) # (batchsize, R+1)
                 #scores = np.concatenate([scores, -np.max(scores, axis=1)[:, None]], axis=1) # (batchsize, R+1)
                 # if multi_class, choose argmax when the model predicts multiple labels 
                 predictions = np.zeros_like(scores) # (num_test, R + 1)
@@ -383,7 +389,7 @@ class Trainer(object):
                 predictions = (scores > threshold_vec) # (num_test, R)
             else:
                 # if multi_class, choose argmax
-                scores = np.concatenate([scores, -logsumexp(scores, axis=1)[:, None]], axis=1) # (batchsize, R+1)
+                #scores = np.concatenate([scores, -logsumexp(scores, axis=1)[:, None]], axis=1) # (batchsize, R+1)
                 #scores = np.concatenate([scores, -np.max(scores, axis=1)[:, None]], axis=1) # (batchsize, R+1)
                 predictions = np.zeros_like(scores) # (num_test, R+1)
                 predictions[np.arange(scores.shape[0]), np.argmax(scores, 1)] = 1

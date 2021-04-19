@@ -99,10 +99,22 @@ class IntOrPercent(click.ParamType):
     help="max doc length of BPE tokens",
 )
 @click.option(
+    "--dim",
+    type=int,
+    default=512,
+    help="dimension of last layer feature before the score function (e.g., dimension of biaffine layer, dimension of boxes)",
+)
+@click.option(
     "--learning_rate",
     type=float,
     default=1e-5,
     help="learning rate",
+)
+@click.option(
+    "--weight_decay",
+    type=float,
+    default=0.0,
+    help="weight decay",
 )
 @click.option(
     "--volume_temp",

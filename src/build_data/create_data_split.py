@@ -13,7 +13,7 @@ val_split = 0.1
 
 data_list = []
 data = ""
-for line in open(data_path + "/alignment_CTD_PTC.merge_rel.pubtator"):
+for line in open(data_path + "/new_ctd/alignment_CTD_PTC.merge_rel.pubtator"):
     if line.strip() == "" and data != "":
         data_list.append(data)
         data = ""
@@ -22,7 +22,7 @@ for line in open(data_path + "/alignment_CTD_PTC.merge_rel.pubtator"):
 
 max_num_null = len(data_list) * (proportion_null / (1 - proportion_null))
 count_null = 0
-for line in open(data_path + "/alignment_CTD_PTC.NULL.pubtator"):
+for line in open(data_path + "/new_ctd/alignment_CTD_PTC.NULL.pubtator"):
     if line.strip() == "" and data != "":
         data_list.append(data)
         data = ""
@@ -37,16 +37,16 @@ random.shuffle(data_list)
 
 def output_split(partition, name):
     
-    fout_stat = open(f"{data_path}/{name}_stats.txt","w")
+    fout_stat = open(f"{data_path}/new_ctd/{name}_stats.txt","w")
     stats = {}
-    with open(f"{data_path}/{name}.json","w") as fout:
+    with open(f"{data_path}/new_ctd/{name}.json","w") as fout:
         data_json_list = []
         for data in partition:
             data_json = {"entity":[], "relation":[], "title":None, "abstract":None, "docid":None}
             for line in data.strip("\n").split("\n"):
                 l = line.split("\t")
                 if len(l) == 5:
-                    data_json["relation"].append({"type": l[1], "subj": l[3], "obj": l[4]})
+                    data_json["relation"].append({"type": l[1], "subj": l[2], "obj": l[3], "desc": l[4]})
                     rel = l[1]
                     if rel not in stats: stats[rel] = 0
                     stats[rel] += 1

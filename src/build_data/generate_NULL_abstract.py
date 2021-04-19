@@ -8,7 +8,7 @@ import json
 random.seed(1234)
 
 pubtator_pmids = []
-for line_ in gzip.open(data_path+"/origin/bioconcepts2pubtatorcentral.gz","rb"):
+for line_ in gzip.open(data_path+"/new_ctd/origin/bioconcepts2pubtatorcentral.gz","rb"):
     try:
         line = line_.decode('ascii')
         pmid = line.strip("\n").split("\t")[0]
@@ -22,7 +22,7 @@ print("ptc loaded")
 sys.stdout.flush()
 
 ctd_pmids = []
-for line_ in gzip.open(f"{data_path}/origin/CTD_chem_gene_ixns.tsv.gz", "rb"):
+for line_ in gzip.open(f"{data_path}/new_ctd/origin/CTD_chem_gene_ixns.tsv.gz", "rb"):
     line = line_.decode('ascii')
     l = line.strip("\n").split("\t")
     if line[0] != "#" and len(l) == 11:
@@ -30,7 +30,7 @@ for line_ in gzip.open(f"{data_path}/origin/CTD_chem_gene_ixns.tsv.gz", "rb"):
         for pmid in pmids:
             ctd_pmids.append(pmid)
 
-for line_ in gzip.open(f"{data_path}/origin/CTD_chemicals_diseases.tsv.gz", "rb"):
+for line_ in gzip.open(f"{data_path}/new_ctd/origin/CTD_chemicals_diseases.tsv.gz", "rb"):
     line = line_.decode('ascii')
     l = line.strip("\n").split("\t")
     if line[0] != "#" and len(l) == 10:
@@ -38,7 +38,7 @@ for line_ in gzip.open(f"{data_path}/origin/CTD_chemicals_diseases.tsv.gz", "rb"
         for pmid in pmids:
             ctd_pmids.append(pmid)
 
-for line_ in gzip.open(f"{data_path}/origin/CTD_genes_diseases.tsv.gz", "rb"):
+for line_ in gzip.open(f"{data_path}/new_ctd/origin/CTD_genes_diseases.tsv.gz", "rb"):
     line = line_.decode('ascii')
     l = line.strip("\n").split("\t")
     if line[0] != "#" and len(l) == 9:
@@ -71,7 +71,7 @@ for pmid in tqdm(list(pubtator_pmids)):
                 etype = line.strip("\n").split("\t")[-2]
                 if etype in ["Chemical","Gene", "Disease"]:
                     entity_type_set.add(etype)
-            if len(entity_type_set) >= 2:
+            if len(entity_type_set) >= 2: # generate harder negatives constraining there to be at least two types of entities
                 fout.write(text + "\n\n")
             #except:
             #pass
