@@ -1,4 +1,6 @@
-# Biomedical Relation Extraction with Document level distant supervision on CTD and PubMed
+# Neural Relation Extraction
+
+This repo contains sentence level, document level relation extraction with close to sota performance. (bert + bran)
 
 Create a new conda enviroment:
 ```
