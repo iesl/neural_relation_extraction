@@ -21,7 +21,7 @@ setup(
         "torch",
         "requests",
         "tqdm",
-        "scikit-learn"
+        "scikit-learn",
     ],
     extras_require={
         "wandb": ["wandb"],
