@@ -7,7 +7,8 @@ from transformers import AutoTokenizer, AutoModel
 
 from module.data_loader import Dataloader
 from module.utils import cuda_if_available
-from module.model import BiaffineNetwork, ConcatNonLinear, Box
+from module.model import BiaffineNetwork, ConcatNonLinear, MinMaxBox
+from module.model import HierarchyBiaffineNetwork, HierarchyConcatNonLinear, HierarchyMinMaxBox
 
 __all__ = [
     "setup",
@@ -24,18 +25,19 @@ def setup(config):
         base_dir_name = "_".join([config["encoder_type"].replace("/","-"),
                                     config["score_func"],
                                     "multilabel_" + str(config["multi_label"]),
+                                    "nah_" + str(config["na_hierarchy"]),
                                     "fullanno_" + str(config["full_annotation"]),
                                     "bz_" + str(config["train_batch_size"]),
                                     "length_" + str(config["max_text_length"]),
-                                    "lr_" + str(config["learning_rate"]),
-                                    "decay_" + str(config["weight_decay"]),
+                                    "lr_" + str(config["learning_rate"])[:7],
+                                    "decay_" + str(config["weight_decay"])[:7],
                                     "dim_" + str(config["dim"]),
-                                    "volt_" + str(config["volume_temp"]),
-                                    "intt_" + str(config["intersection_temp"]),
+                                    "volt_" + str(config["volume_temp"])[:7],
+                                    "intt_" + str(config["intersection_temp"])[:7],
                                     "epochs_" + str(config["epochs"]),
                                     "patience_" + str(config["patience"]),
                                     "interval_" + str(config["log_interval"]),
-                                    "warmup_" + str(config["warmup"]),
+                                    "warmup_" + str(config["warmup"])[:7],
                                     "seed_" + str(config["seed"])
                                     ])
         config["data_path"] = config["data_path"].rstrip("/")
@@ -76,12 +78,19 @@ def setup(config):
         tokenizer.add_tokens(entity_marker_tokens)
     
     # setup model
-    if config["score_func"] == "biaffine":
+    if config["score_func"] == "biaffine" and config["na_hierarchy"] == False:
         model = BiaffineNetwork(config)
-    elif config["score_func"] == "nn":
+    elif config["score_func"] == "biaffine" and config["na_hierarchy"] == True:
+        model = HierarchyBiaffineNetwork(config)
+    elif config["score_func"] == "nn" and config["na_hierarchy"] == False:
         model = ConcatNonLinear(config)
-    elif config["score_func"] == "box":
-        model = Box(config)
+    elif config["score_func"] == "nn" and config["na_hierarchy"] == True:
+        model = HierarchyConcatNonLinear(config)
+    elif config["score_func"] == "box" and config["na_hierarchy"] == False:
+        model = MinMaxBox(config)
+    elif config["score_func"] == "box" and config["na_hierarchy"] == True:
+        model = HierarchyMinMaxBox(config)
+
     model.to(device)
     model.encoder.resize_token_embeddings(len(tokenizer)) # create token embedding for new added markers
     

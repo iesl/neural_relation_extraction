@@ -27,6 +27,8 @@ class Trainer(object):
         self.opt = torch.optim.AdamW(
             self.model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"]
         )
+        self.bcelogitloss = torch.nn.BCEWithLogitsLoss() # y is 1 or 0, x is 1-d logit
+        self.celogitloss = torch.nn.CrossEntropyLoss() # y is a non-negative integer, x is a multi dimensional logits
         
         #for name, param in self.model.named_parameters():
         #    #if param.requires_grad:
@@ -55,25 +57,25 @@ class Trainer(object):
         self.opt = vars(checkpoint['opt'])
         self.model.load_state_dict(checkpoint['model'])
         return checkpoint['threshold']
-        
+
 
     def train(self):
         if self.config["wandb"]:
-            wandb.init(project="re")
+            wandb.init(project="re", settings=wandb.Settings(start_method="fork"))
             wandb.config.update(self.config, allow_val_change=True)
 
         self.logger.debug("This is training")
         #inputs = tokenizer("Hello world!", return_tensors="pt")
         #outputs = self.model(**inputs)
         if self.config["multi_label"] == True and self.config["score_func"] != "box":
-            loss_func = torch.nn.BCEWithLogitsLoss()
+            loss_func = lambda input, target: self.bcelogitloss(input, target)
         elif self.config["multi_label"] == True and self.config["score_func"] == "box":
             loss_func = lambda input, target: -(target * input + (1 - target) * log1mexp(input)).mean() # bce log loss
-        elif self.config["multi_label"] == False and self.config["score_func"] != "box":
-            loss_func = torch.nn.CrossEntropyLoss()
-        elif self.config["multi_label"] == False and self.config["score_func"] == "box":
-            loss_func = torch.nn.CrossEntropyLoss()
-            #raise ValueError(f"box model currently only works when multi_label == True")
+        elif self.config["multi_label"] == False and self.config['na_hierarchy'] == False:
+            loss_func = lambda input, target: self.celogitloss(input, target) # input are logits 
+        elif self.config["multi_label"] == False and self.config['na_hierarchy'] == True:
+            loss_func = lambda input, target: -input[torch.arange(target.shape[0]).long(), target.long()].mean()  # input are log prob
+
 
         best_metric = 0
         best_metric_threshold = {}

@@ -1,5 +1,5 @@
 import os
-os.environ['TRANSFORMERS_CACHE']=os.environ['PYTHONPATH'] + '/.cache/huggingface/'
+os.environ['TRANSFORMERS_CACHE']=os.environ['BIORE_OUTPUT_ROOT'] + '/.cache/huggingface/'
 
 import sys
 import click
@@ -55,7 +55,8 @@ class IntOrPercent(click.ParamType):
 @click.option(
     "--encoder_type",
     type=click.Choice(
-        ["bert-base-cased", "bert-base-uncased" , "bert-large-cased", "bert-large-uncased", "roberta-large", "roberta-base", "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract"],
+        ["bert-base-cased", "bert-base-uncased" , "bert-large-cased", "bert-large-uncased",
+         "roberta-large", "roberta-base", "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract"],
         case_sensitive=False,
     ),
     default="microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract",
@@ -76,9 +77,18 @@ class IntOrPercent(click.ParamType):
     help="multi_label allows multiple labels during inference; multi_class only allow one label"
 )
 @click.option(
+    "--na_hierarchy / --flat",
+    default=False,
+    help="na_hierarchy has a binary classifier on top " 
+    + "for no_relation detection, and then cascade another layer of softmax" 
+    + " for relation prediction; flat mode indicate vanilla softmax with single flat layer"
+    + "(ignored when --multi_label is set)"
+)
+@click.option(
     "--full_annotation / --partial_annotation",
     default=True,
-    help="full_annotation means all unlabeled pairs indicate no relation; partial_annotation means we don't train or evaluate on unlabeled pairs."
+    help="full_annotation means all unlabeled pairs indicate no relation; "
+     + "partial_annotation means we don't train or evaluate on unlabeled pairs."
 )
 @click.option(
     "--train_batch_size",
@@ -102,7 +112,8 @@ class IntOrPercent(click.ParamType):
     "--dim",
     type=int,
     default=512,
-    help="dimension of last layer feature before the score function (e.g., dimension of biaffine layer, dimension of boxes)",
+    help="dimension of last layer feature before the score function "
+     + "(e.g., dimension of biaffine layer, dimension of boxes)",
 )
 @click.option(
     "--learning_rate",
