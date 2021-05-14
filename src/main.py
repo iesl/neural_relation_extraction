@@ -2,6 +2,7 @@ import os
 os.environ['TRANSFORMERS_CACHE']=os.environ['BIORE_OUTPUT_ROOT'] + '/.cache/huggingface/'
 
 import sys
+import json
 import click
 from module.train import Trainer
 from module.setup import setup
@@ -77,12 +78,37 @@ class IntOrPercent(click.ParamType):
     help="multi_label allows multiple labels during inference; multi_class only allow one label"
 )
 @click.option(
-    "--na_hierarchy / --flat",
-    default=False,
-    help="na_hierarchy has a binary classifier on top " 
-    + "for no_relation detection, and then cascade another layer of softmax" 
-    + " for relation prediction; flat mode indicate vanilla softmax with single flat layer"
+    "--na_mode",
+    type=click.Choice(
+        ["0", "1", "2", "3", "4"],
+        case_sensitive=False,
+    ),
+    default="0",
+    help="na_mode" 
+    + "0: na as a vector / box"
+    + "1: has a binary classifier on top for no_relation detection, and then cascade another layer of softmax" 
+    + "2: hardcoded constraint that type box should be inside not_na box (will be equivalent to 2 for nn / biaffine)"
+    + "3: regularizing type boxes to be inside not_na box (will be equivalent to 2 for nn / biaffine)"
+    + "4: 2 + 3 (will be equivalent to 2 for nn / biaffine)"
     + "(ignored when --multi_label is set)"
+)
+@click.option(
+    "--categorical_weight",
+    type=float,
+    default=0.01,
+    help="weight of categorical classifier (w/o NA) loss term, ignore if na_mode == 0"
+)
+@click.option(
+    "--na_weight",
+    type=float,
+    default=0.01,
+    help="weight of binary classifier (exist a relation or not) loss term, ignore if na_mode == 0"
+)
+@click.option(
+    "--na_box_weight",
+    type=float,
+    default=0.01,
+    help="weight for let not_na box to contain other relation boxes, ignored if score_func != box or na_mode not 3, 4"
 )
 @click.option(
     "--full_annotation / --partial_annotation",
@@ -93,8 +119,15 @@ class IntOrPercent(click.ParamType):
 @click.option(
     "--train_batch_size",
     type=int,
-    default=8,
+    default=2,
     help="batch size for training",
+)
+@click.option(
+    "--grad_accumulation_steps",
+    type=int,
+    default=16,
+    help="tricks to have larger batch size with limited memory."
+    + " The real batch size = train_batch_size * grad_accumulation_steps",
 )
 @click.option(
     "--test_batch_size",
@@ -128,6 +161,12 @@ class IntOrPercent(click.ParamType):
     help="weight decay",
 )
 @click.option(
+    "--dropout_rate",
+    type=float,
+    default=0.1,
+    help="dropout rate",
+)
+@click.option(
     "--volume_temp",
     type=float,
     default=1.0,
@@ -139,7 +178,13 @@ class IntOrPercent(click.ParamType):
     default=1e-3,
     help="intersection temp for box (default 1e-3)",
 )
-@click.option("--epochs", type=int, default=50, help="number of epochs to train")
+@click.option(
+    "--max_grad_norm",
+    type=float,
+    default=1.0,
+    help="gradient norm clip (default 1.0)",
+)
+@click.option("--epochs", type=int, default=5, help="number of epochs to train")
 @click.option(
     "--patience",
     type=int,
@@ -155,10 +200,10 @@ class IntOrPercent(click.ParamType):
 )
 @click.option(
     "--warmup",
-    type=IntOrPercent(),
-    default=0.0,
+    type=float,
+    default=-1.0,
     help="number of examples or percentage of training examples for warm up training "
-    "(default: 0.0, i.e. warm up during first 30 percent of training examples in the first epoch), recommend 0.3",
+    "(default: -1.0, no warmup, constant learning rate",
 )
 @click.option(
     "--seed",
@@ -169,7 +214,8 @@ class IntOrPercent(click.ParamType):
 @click.option(
     "--eval_na / --not_eval_na",
     default=False,
-    help="eval_NA will evaluate NA during test. If --multi_label is True, this flags will be ignored."
+    help="eval_NA will evaluate NA during test. If --multi_label is True, this flags will be ignored." 
+    + "Usually set to false. For example, Tacred only uses micro F1 and the evaluation does not include sentence when the ground truth is NA and prediction is also NA. Same for BRAN"
 )
 @click.option(
     "--cuda / --no_cuda",
@@ -183,15 +229,31 @@ class IntOrPercent(click.ParamType):
 )
 def main(**config):
 
+    if config["output_path"] != "" and config["train"] == False:
+        config_path = os.path.join(config["output_path"], 'log')
+        config_str = open(config_path).read().split('\n')[1].split(' - ')[1].replace("'", '"').replace("True", "true").replace("False", "false")
+        config_load = json.loads(config_str)
+        config_load["train"] = config["train"]
+        config_load["wandb"] = config["wandb"]
+        config_load["output_path"] = config["output_path"]
+        config_load["cuda"] = config["cuda"]
+        for key in config:
+            if key not in config_load:
+                config_load[key] = config[key]
+        config = config_load
+
     data, model, device, logger = setup(config)
     trainer = Trainer(data, model, logger, config, device)
     if config["train"] == True:
         trainer.train()
     else:
         best_metric_threshold = trainer.load_model()
-        macro_perf, micro_perf, per_rel_perf = trainer.test(test=True, best_metric_threshold=best_metric_threshold)
+        trainer.model.eval()
+        macro_perf, micro_perf, categ_micro_perf, not_na_perf, per_rel_perf = trainer.test(test=True, best_metric_threshold=best_metric_threshold)
         logger.info(f"Test: Macro Precision={macro_perf['P']}, Macro Recall={macro_perf['R']}, Macro F1={macro_perf['F']}")
         logger.info(f"Test: Micro Precision={micro_perf['P']}, Micro Recall={micro_perf['R']}, Micro F1={micro_perf['F']}")
+        logger.info(f"Test: Categorical Micro Precision={categ_micro_perf['P']}, Micro Recall={categ_micro_perf['R']}, Micro F1={categ_micro_perf['F']}")
+        logger.info(f"Test: not_na Precision={not_na_perf['P']}, not_na Recall={not_na_perf['R']}, not_na F1={not_na_perf['F']}")
         for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
             logger.info(f"TEST: {rel_name}, Precision={pp}, Recall={rr}, F1={ff}, threshold={tt} (threshold not used for multiclass)")
     logger.info("Program finished")

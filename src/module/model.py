@@ -16,7 +16,8 @@ __all__ = [
     "HierarchyConcatNonLinear",
     "CenterBox",
     "MinMaxBox",
-    "HierarchyMinMaxBox"
+    "HierarchyMinMaxBox",
+    "HierarchyMinMaxBoxHardcoded",
 ]
 
 
@@ -165,6 +166,7 @@ class ConcatNonLinear(nn.Module):
         self.multi_label = config["multi_label"]
         self.softmax = torch.nn.Softmax(dim=1)
         self.sigmoid = torch.nn.Sigmoid()
+        self.dropout = torch.nn.Dropout(p=config["dropout_rate"])
         
     def forward(self, input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator):
         # input_ids: (batchsize, text_length)
@@ -178,7 +180,7 @@ class ConcatNonLinear(nn.Module):
         
         e1_vec = (h * e1_indicator[:,:,None]).max(1)[0] # (batchsize, D)
         e2_vec = (h * e2_indicator[:,:,None]).max(1)[0] # (batchsize, D)
-        pairwise_scores = self.layer2(self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1)))) # (batchsize, R+1)
+        pairwise_scores = self.layer2(self.dropout(self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1))))) # (batchsize, R+1)
         if self.multi_label == True:
             pairwise_scores = pairwise_scores[:, :-1] # (batchsize, R)
         
@@ -192,7 +194,7 @@ class HierarchyConcatNonLinear(ConcatNonLinear):
         self.layer1_na = torch.nn.Linear(self.D * 2, self.dim)
         self.layer2_na = torch.nn.Linear(self.dim, 1)
 
-        
+
     def forward(self, input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator):
         # input_ids: (batchsize, text_length)
         # subj_indicators: (batchsize, text_length)
@@ -205,11 +207,11 @@ class HierarchyConcatNonLinear(ConcatNonLinear):
         
         e1_vec = (h * e1_indicator[:,:,None]).max(1)[0] # (batchsize, D)
         e2_vec = (h * e2_indicator[:,:,None]).max(1)[0] # (batchsize, D)
-        pairwise_scores = self.layer2(self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1)))) # (batchsize, R + 1)
+        pairwise_scores = self.layer2(self.dropout(self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1))))) # (batchsize, R + 1)
         
         if self.multi_label == False:
             
-            logit_not_na = self.layer2_na(self.relu(self.layer1_na(torch.cat([e1_vec, e2_vec], 1)))) # (batchsize, 1)
+            logit_not_na = self.layer2_na(self.dropout(self.relu(self.layer1_na(torch.cat([e1_vec, e2_vec], 1))))) # (batchsize, 1)
             logit_r = pairwise_scores[:, :-1] # (batchsize, R)
             prob_not_na = self.sigmoid(logit_not_na) # (batchsize, 1)
             prob_r = prob_not_na * self.softmax(logit_r) # (batchsize, R)
@@ -246,7 +248,34 @@ class CenterBox(nn.Module):
         self.multi_label = config["multi_label"]
         self.hsm = config["hsm"]
         self.softmax = torch.nn.Softmax(dim=1)
-        
+    
+
+    def transition_matrix(self):
+        min_, max_ = self.param2minmax(self.rel_center, self.rel_sl) # (R+1, D)
+        row_z = min_[:, None, :].repeat(1, self.num_rel + 1, 1) # (R+1, R+1, D)
+        row_Z = max_[:, None, :].repeat(1, self.num_rel + 1, 1)
+        col_z = min_[None, :, :].repeat(self.num_rel + 1, 1, 1)
+        col_Z = max_[None, :, :].repeat(self.num_rel + 1, 1, 1)
+
+        meet_z, meet_Z = self.gumbel_intersection(row_z, row_Z, col_z, col_Z) # (R+1, R+1, )
+        log_overlap_volume = self.log_volume(meet_z, meet_Z) # (R+1, R+1, )
+        log_row_volume = self.log_volume(row_z, row_Z) # (R+1, R+1, )
+        log_prob = log_overlap_volume - log_row_volume # (R+1, R+1, )
+        return log_prob, log_row_volume[:, 0] # log P(column | row) = log_prob[row, column]
+
+    def prob_not_na_given_r(self):
+        min_, max_ = self.param2minmax(self.rel_center, self.rel_sl) # (R+1, D)
+        r_z = min_[:-1] # (R, D)
+        r_Z = max_[:-1] # (R, D)
+        not_na_z = min_[-1:].repeat(self.num_rel, 1) # (R, D)
+        not_na_Z = max_[-1:].repeat(self.num_rel, 1) # (R, D)
+
+        meet_z, meet_Z = self.gumbel_intersection(not_na_z, not_na_Z, r_z, r_Z) # (R, )
+        log_overlap_volume = self.log_volume(meet_z, meet_Z) # (R, )
+        log_row_volume = self.log_volume(r_z, r_Z) # (R, )
+        log_prob = log_overlap_volume - log_row_volume # (R, )
+        return log_prob # log P(not_na | r) = log_prob[r]
+
 
     def param2minmax(self, center, length):
         length_ = self.softplus(length)
@@ -343,7 +372,33 @@ class MinMaxBox(nn.Module):
         self.multi_label = config["multi_label"]
         self.softmax = torch.nn.Softmax(dim=1)
         
+    def transition_matrix(self):
+        min_, max_ = self.rel_min, self.rel_max # (R+1, D)
+        row_z = min_[:, None, :].repeat(1, self.num_rel + 1, 1) # (R+1, R+1, D)
+        row_Z = max_[:, None, :].repeat(1, self.num_rel + 1, 1)
+        col_z = min_[None, :, :].repeat(self.num_rel + 1, 1, 1)
+        col_Z = max_[None, :, :].repeat(self.num_rel + 1, 1, 1)
 
+        meet_z, meet_Z = self.gumbel_intersection(row_z, row_Z, col_z, col_Z) # (R+1, R+1, )
+        log_overlap_volume = self.log_volume(meet_z, meet_Z) # (R+1, R+1, )
+        log_row_volume = self.log_volume(row_z, row_Z) # (R+1, R+1, )
+        log_prob = log_overlap_volume - log_row_volume # (R+1, R+1, )
+        return log_prob, log_row_volume[:, 0] # log P(column | row) = log_prob[row, column]
+
+    
+    def prob_not_na_given_r(self):
+        min_, max_ = self.rel_min, self.rel_max # (R+1, D)
+        r_z = min_[:-1] # (R, D)
+        r_Z = max_[:-1] # (R, D)
+        not_na_z = min_[-1:].repeat(self.num_rel, 1) # (R, D)
+        not_na_Z = max_[-1:].repeat(self.num_rel, 1) # (R, D)
+
+        meet_z, meet_Z = self.gumbel_intersection(not_na_z, not_na_Z, r_z, r_Z) # (R, )
+        log_overlap_volume = self.log_volume(meet_z, meet_Z) # (R, )
+        log_row_volume = self.log_volume(r_z, r_Z) # (R, )
+        log_prob = log_overlap_volume - log_row_volume # (R, )
+        return log_prob # log P(not_na | r) = log_prob[r]
+    
 
     def param2minmax(self, min_, max_):
         z = torch.min(min_, max_)
@@ -413,25 +468,48 @@ class HierarchyMinMaxBox(MinMaxBox):
     def __init__(self, config):
         super().__init__(config)
 
-        self.rel_min = torch.nn.Parameter(torch.rand(self.num_rel, self.dim) * 0.5 - 0.5, requires_grad=True)
-        self.rel_max = torch.nn.Parameter(torch.rand(self.num_rel, self.dim) * 0.5, requires_grad=True)
+        self.rel_min = torch.nn.Parameter(torch.rand(self.num_rel, self.dim) * 0.1 - 0.1, requires_grad=True)
+        self.rel_max = torch.nn.Parameter(torch.rand(self.num_rel, self.dim) * 0.1, requires_grad=True)
         self.na_min = torch.nn.Parameter(torch.rand(1, self.dim)*0.5 - 1.0, requires_grad=True) # [-1, -0.5]
         self.na_max = torch.nn.Parameter(torch.rand(1, self.dim)*0.5 + 0.5, requires_grad=True) # [0.5, 1.0]
-        self.sigmoid = torch.nn.Sigmoid()
 
 
     def relation_box(self):
         
         z_na, Z_na = self.param2minmax(self.na_min, self.na_max) # (1, D)
         z_r, Z_r = self.param2minmax(self.rel_min, self.rel_max)
-        z_r, Z_r = self.sigmoid(z_r), self.sigmoid(Z_r) # (R, D)
-        
-        z_r, Z_r = z_na + z_r * (Z_na - z_na), z_na + Z_r * (Z_na - z_na) # (R, D)
         
         z = torch.cat([z_r, z_na], 0) # (R+1, D)
         Z = torch.cat([Z_r, Z_na], 0)
 
         return z, Z
+
+    def transition_matrix(self):
+        min_, max_ = self.relation_box() # (R+1, D)
+        row_z = min_[:, None, :].repeat(1, self.num_rel + 1, 1) # (R+1, R+1, D)
+        row_Z = max_[:, None, :].repeat(1, self.num_rel + 1, 1)
+        col_z = min_[None, :, :].repeat(self.num_rel + 1, 1, 1)
+        col_Z = max_[None, :, :].repeat(self.num_rel + 1, 1, 1)
+
+        meet_z, meet_Z = self.gumbel_intersection(row_z, row_Z, col_z, col_Z) # (R+1, R+1, )
+        log_overlap_volume = self.log_volume(meet_z, meet_Z) # (R+1, R+1, )
+        log_row_volume = self.log_volume(row_z, row_Z) # (R+1, R+1, )
+        log_prob = log_overlap_volume - log_row_volume # (R+1, R+1, )
+        return log_prob, log_row_volume[:, 0] # log P(column | row) = log_prob[row, column]
+
+
+    def prob_not_na_given_r(self):
+        min_, max_ = self.relation_box() # (R+1, D)
+        r_z = min_[:-1] # (R, D)
+        r_Z = max_[:-1] # (R, D)
+        not_na_z = min_[-1:].repeat(self.num_rel, 1) # (R, D)
+        not_na_Z = max_[-1:].repeat(self.num_rel, 1) # (R, D)
+
+        meet_z, meet_Z = self.gumbel_intersection(not_na_z, not_na_Z, r_z, r_Z) # (R, )
+        log_overlap_volume = self.log_volume(meet_z, meet_Z) # (R, )
+        log_row_volume = self.log_volume(r_z, r_Z) # (R, )
+        log_prob = log_overlap_volume - log_row_volume # (R, )
+        return log_prob # log P(not_na | r) = log_prob[r]
 
 
     def forward(self, input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator):
@@ -467,4 +545,29 @@ class HierarchyMinMaxBox(MinMaxBox):
             log_prob_r = log_cond_prob_not_na + torch.log(self.softmax(log_overlap_volume[:, :-1])) # (batchsize, R)
             log_prob = torch.cat([log_prob_r, log_cond_prob_na], 1) # (batchsize, R + 1)
         return log_prob
+
+
+class HierarchyMinMaxBoxHardcoded(HierarchyMinMaxBox):
+
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.rel_min = torch.nn.Parameter(torch.rand(self.num_rel, self.dim) * 0.5 - 0.5, requires_grad=True)
+        self.rel_max = torch.nn.Parameter(torch.rand(self.num_rel, self.dim) * 0.5, requires_grad=True)
+        self.sigmoid = torch.nn.Sigmoid()
+
+
+    def relation_box(self):
+        
+        z_na, Z_na = self.param2minmax(self.na_min, self.na_max) # (1, D)
+        z_r, Z_r = self.param2minmax(self.rel_min, self.rel_max)
+        z_r, Z_r = self.sigmoid(z_r), self.sigmoid(Z_r) # (R, D)
+        
+        z_r, Z_r = z_na + z_r * (Z_na - z_na), z_na + Z_r * (Z_na - z_na) # (R, D)
+        
+        z = torch.cat([z_r, z_na], 0) # (R+1, D)
+        Z = torch.cat([Z_r, Z_na], 0)
+
+        return z, Z
+
     

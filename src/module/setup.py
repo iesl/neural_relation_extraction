@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, AutoModel
 from module.data_loader import Dataloader
 from module.utils import cuda_if_available
 from module.model import BiaffineNetwork, ConcatNonLinear, MinMaxBox
-from module.model import HierarchyBiaffineNetwork, HierarchyConcatNonLinear, HierarchyMinMaxBox
+from module.model import HierarchyBiaffineNetwork, HierarchyConcatNonLinear, HierarchyMinMaxBox, HierarchyMinMaxBoxHardcoded
 
 __all__ = [
     "setup",
@@ -25,20 +25,24 @@ def setup(config):
         base_dir_name = "_".join([config["encoder_type"].replace("/","-"),
                                     config["score_func"],
                                     "multilabel_" + str(config["multi_label"]),
-                                    "nah_" + str(config["na_hierarchy"]),
+                                    "namode_" + str(config["na_mode"]),
                                     "fullanno_" + str(config["full_annotation"]),
                                     "bz_" + str(config["train_batch_size"]),
-                                    "length_" + str(config["max_text_length"]),
-                                    "lr_" + str(config["learning_rate"])[:7],
-                                    "decay_" + str(config["weight_decay"])[:7],
-                                    "dim_" + str(config["dim"]),
-                                    "volt_" + str(config["volume_temp"])[:7],
-                                    "intt_" + str(config["intersection_temp"])[:7],
+                                    "acc_" + str(config["grad_accumulation_steps"]),
+                                    "len_" + str(config["max_text_length"]),
+                                    "lr_" + str(config["learning_rate"])[:6],
+                                    "decay_" + str(config["weight_decay"])[:6],
+                                    "clip_" + str(config["max_grad_norm"])[:6],
+                                    "d_" + str(config["dim"]),
+                                    "vt_" + str(config["volume_temp"])[:6],
+                                    "it_" + str(config["intersection_temp"])[:6],
+                                    "na_" + str(config["na_weight"])[:6],
+                                    "cate_" + str(config["categorical_weight"])[:6],
+                                    "na_box_" + str(config["na_box_weight"])[:6],
                                     "epochs_" + str(config["epochs"]),
-                                    "patience_" + str(config["patience"]),
+                                    "pat_" + str(config["patience"]),
                                     "interval_" + str(config["log_interval"]),
-                                    "warmup_" + str(config["warmup"])[:7],
-                                    "seed_" + str(config["seed"])
+                                    "warmup_" + str(config["warmup"])[:6],
                                     ])
         config["data_path"] = config["data_path"].rstrip("/")
         config["output_path"] = os.path.join(os.environ['BIORE_OUTPUT_ROOT'], "saved_models", 
@@ -78,18 +82,20 @@ def setup(config):
         tokenizer.add_tokens(entity_marker_tokens)
     
     # setup model
-    if config["score_func"] == "biaffine" and config["na_hierarchy"] == False:
+    if config["score_func"] == "biaffine" and config["na_mode"] == "0":
         model = BiaffineNetwork(config)
-    elif config["score_func"] == "biaffine" and config["na_hierarchy"] == True:
+    elif config["score_func"] == "biaffine" and config["na_mode"] != "0":
         model = HierarchyBiaffineNetwork(config)
-    elif config["score_func"] == "nn" and config["na_hierarchy"] == False:
+    elif config["score_func"] == "nn" and config["na_mode"] == "0":
         model = ConcatNonLinear(config)
-    elif config["score_func"] == "nn" and config["na_hierarchy"] == True:
+    elif config["score_func"] == "nn" and config["na_mode"] != "0":
         model = HierarchyConcatNonLinear(config)
-    elif config["score_func"] == "box" and config["na_hierarchy"] == False:
+    elif config["score_func"] == "box" and config["na_mode"] == "0":
         model = MinMaxBox(config)
-    elif config["score_func"] == "box" and config["na_hierarchy"] == True:
+    elif config["score_func"] == "box" and config["na_mode"] == "3":
         model = HierarchyMinMaxBox(config)
+    elif config["score_func"] == "box" and config["na_mode"] in ["2", "4"]:
+        model = HierarchyMinMaxBoxHardcoded(config)
 
     model.to(device)
     model.encoder.resize_token_embeddings(len(tokenizer)) # create token embedding for new added markers
@@ -106,11 +112,13 @@ def setup(config):
     time2 = time.time()
     logger.info("Time spent loading data: %f" % (time2 - time1))
 
+    config["max_num_steps"] = len(data) * config["epochs"]  / config["train_batch_size"]
     if isinstance(config["log_interval"], float):
         config["log_interval"] = len(data) * config["log_interval"]
         logger.info(f"Log interval: {config['log_interval']}")
+        print(len(data), config["log_interval"], config["log_interval"])
     if isinstance(config["warmup"], float):
-        config["warmup"] = len(data) * config["warmup"]
+        config["warmup"] = config["max_num_steps"]  * config["warmup"]
         logger.info(f"warmup {config['warmup']}")
     if config["multi_label"] == True:
         config["eval_na"] = False
