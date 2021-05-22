@@ -9,15 +9,18 @@ __all__ = [
     "Dataloader",
 ]
 
-ENTITY_PAIR_TYPE_SET = set([("Chemical", "Disease"), ("Chemical", "Gene"), ("Gene", "Disease")])
+ENTITY_PAIR_TYPE_SET = set(
+    [("Chemical", "Disease"), ("Chemical", "Gene"), ("Gene", "Disease")])
 
 # position index mapping from character level offset to token offset
+
+
 def map_index(text, text_tokenized, unk_token):
-    #print(text)
-    #print(text_tokenized)
+    # print(text)
+    # print(text_tokenized)
     sys.stdout.flush()
     ind_map = {}
-    i, k = 0, 0 # (character i to token k)
+    i, k = 0, 0  # (character i to token k)
     len_text = len(text)
     num_token = len(text_tokenized)
     while k < num_token:
@@ -26,10 +29,13 @@ def map_index(text, text_tokenized, unk_token):
             i += 1
             continue
         token = text_tokenized[k]
-        if token[:2] == "##": token = token[2:]
-        if token[:1] == "Ġ": token = token[1:]
+        if token[:2] == "##":
+            token = token[2:]
+        if token[:1] == "Ġ":
+            token = token[1:]
 
-        if token != text[i:(i+len(token))]:# assume that unk is always one character in the input text.
+        # assume that unk is always one character in the input text.
+        if token != text[i:(i+len(token))]:
             ind_map[i] = k
             i += 1
             k += 1
@@ -38,13 +44,13 @@ def map_index(text, text_tokenized, unk_token):
                 ind_map[i] = k
                 i += 1
             k += 1
-        
+
     return ind_map
 
 
 def map_index_bkup(text, text_tokenized, unk_token):
-    #print(text)
-    #print(text_tokenized)
+    # print(text)
+    # print(text_tokenized)
     sys.stdout.flush()
     ind_map = {}
     i, j = 0, 0
@@ -52,9 +58,12 @@ def map_index_bkup(text, text_tokenized, unk_token):
     num_token = len(text_tokenized)
     while j < num_token:
         token = text_tokenized[j]
-        if token[:2] == "##": token = token[2:]
-        if token[:1] == "Ġ": token = token[1:]
-        if token != text[i:(i+len(token))]: # deal with [UNK] and space. characters of [UNK] will point to next token.
+        if token[:2] == "##":
+            token = token[2:]
+        if token[:1] == "Ġ":
+            token = token[1:]
+        # deal with [UNK] and space. characters of [UNK] will point to next token.
+        if token != text[i:(i+len(token))]:
             ind_map[i] = j
             if token == "[UNK]":
                 i += 1
@@ -75,12 +84,13 @@ def map_index_bkup(text, text_tokenized, unk_token):
 
 
 def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True, full_annotation=True):
+    # print(data_entry)
     """convert to index array, cut long sentences, cut long document, pad short sentences, pad short document"""
     cls_token = tokenizer.cls_token
     sep_token = tokenizer.sep_token
     unk_token = tokenizer.unk_token
     cls_token_length = len(cls_token)
-    
+
     docid = data_entry["docid"]
     if "title" in data_entry and "abstract" in data_entry:
         text = data_entry["title"] + data_entry["abstract"]
@@ -95,10 +105,9 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
     relations_info = data_entry["relation"]
     rel_vocab_size = len(relation_map)
 
-
     # tokenizer will automatically add cls and sep at the beginning and end of each sentence
     # [CLS] --> 101, [PAD] --> 0, [SEP] --> 102, [UNK] --> 100
-     
+
     text_tokenized = tokenizer.tokenize(text)[:(max_text_length-2)]
     text_tokenized = [cls_token] + text_tokenized + [sep_token]
     text_wid = tokenizer.convert_tokens_to_ids(text_tokenized)
@@ -125,7 +134,7 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
     entity_id_set = set([])
     max_length = len(text_tokenized)
     for entity in entities_info:
-        # if entity mention is outside max_text_length, ignore. +6 indicates additional offset due to "[CLS] " 
+        # if entity mention is outside max_text_length, ignore. +6 indicates additional offset due to "[CLS] "
         entity_id_set.add(entity["id"])
         entity_type[entity["id"]] = entity["type"]
         if entity["id"] not in entity_indicator:
@@ -135,7 +144,7 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
             startid = ind_map[entity["start"] + cls_token_length]
         else:
             startid = max_length - 1
-            
+
         entity_indicator[entity["id"]][startid] = 1
 
         if entity["end"] + cls_token_length in ind_map:
@@ -144,8 +153,7 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
         else:
             endid = max_length - 1
         #print(text_tokenized[startid], input_array[startid], startid)
-        #sys.stdout.flush()
-            
+        # sys.stdout.flush()
 
     relations_vector = {}
     relations = {}
@@ -153,15 +161,15 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
     for rel in relations_info:
         rel_type, e1, e2 = rel["type"], rel["subj"], rel["obj"]
         if e1 in entity_indicator and e2 in entity_indicator:
-            if (e1, e2) not in relations_vector: 
+            if (e1, e2) not in relations_vector:
                 relations_vector[(e1, e2)] = np.zeros(rel_vocab_size)
             if rel_type in relation_map:
                 # NA should not be in the relation_map to generate all-zero vector.
                 relations_vector[(e1, e2)][relation_map[rel_type]] = 1
-            if (e1, e2) not in relations: relations[(e1, e2)] = []
+            if (e1, e2) not in relations:
+                relations[(e1, e2)] = []
             relations[(e1, e2)].append(rel_type)
-    #print(relations_vector)
-    #print(entity_id_set)
+
     output_data = []
     sys.stdout.flush()
     if full_annotation == True:
@@ -180,36 +188,35 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
                         label_names = relations[(e1, e2)]
                     else:
                         label_names = []
-                    
-                    output_data.append({"input": input_array, "pad": pad_array, "docid": docid, 
+                    output_data.append({"input": input_array, "pad": pad_array, "docid": docid,
                                         "label_vector": label_vector, "label_names": label_names,
-                                        "e1_indicators": e1_indicators, "e2_indicators": e2_indicators, 
-                                        "e1": e1, "e2": e2, 
+                                        "e1_indicators": e1_indicators, "e2_indicators": e2_indicators,
+                                        "e1": e1, "e2": e2,
                                         "e1_type": entity_type[e1], "e2_type": entity_type[e2],
                                         "input_length": input_length
                                         })
     else:
         # in this mode, NA relation label occurs only when it is shown in the data
-        #print(relations_vector.keys())
+
         for e1, e2 in relations_vector:
+
             label_vector = relations_vector[(e1, e2)]
             label_names = relations[(e1, e2)]
             e1_indicators, e2_indicators = entity_indicator[e1], entity_indicator[e2]
-            output_data.append({"input": input_array, "pad": pad_array, "docid": docid, 
+            output_data.append({"input": input_array, "pad": pad_array, "docid": docid,
                                 "label_vector": label_vector, "label_names": label_names,
-                                "e1_indicators": e1_indicators, "e2_indicators": e2_indicators, 
-                                "e1": e1, "e2": e2, 
+                                "e1_indicators": e1_indicators, "e2_indicators": e2_indicators,
+                                "e1": e1, "e2": e2,
                                 "e1_type": entity_type[e1], "e2_type": entity_type[e2],
                                 "input_length": input_length
                                 })
             #print(e1, e2, label_names, label_vector)
             sys.stdout.flush()
-            #print(output_data[-1])
+            # print(output_data[-1])
             sys.stdout.flush()
 
     sys.stdout.flush()
     return output_data
-    
 
 
 class Dataloader(object):
@@ -224,9 +231,10 @@ class Dataloader(object):
         self.logger = logger
         # tokenizer.batch_decode(wids["input_ids"], skip_special_tokens=True, clean_up_tokenization_spaces=False)
 
-        self.relation_map = json.loads(open(data_path + "/relation_map.json").read())
-        self.relation_name = dict([(i, r) for r, i in self.relation_map.items()])
-
+        self.relation_map = json.loads(
+            open(data_path + "/relation_map.json").read())
+        self.relation_name = dict([(i, r)
+                                  for r, i in self.relation_map.items()])
 
         def calculate_stat(data):
             num_pos_rels = 0
@@ -237,11 +245,12 @@ class Dataloader(object):
             for d in data:
                 relation_names = d["label_names"]
                 for rel_name in relation_names:
-                    if rel_name not in per_rel_stat: 
+                    if rel_name not in per_rel_stat:
                         per_rel_stat[rel_name] = 0
                 e1t, e2t = d["e1_type"], d["e2_type"]
-                if (e1t, e2t) not in entity_type_pair_stat: 
-                    entity_type_pair_stat[(e1t, e2t)] = {"num_pos_pairs": 0, "num_neg_pairs": 0, "num_pos_rels": 0}
+                if (e1t, e2t) not in entity_type_pair_stat:
+                    entity_type_pair_stat[(e1t, e2t)] = {
+                        "num_pos_pairs": 0, "num_neg_pairs": 0, "num_pos_rels": 0}
 
                 num_pos_ = d["label_vector"].sum()
                 if num_pos_ == 0:
@@ -250,24 +259,28 @@ class Dataloader(object):
                 else:
                     num_pos_rels += num_pos_
                     num_pos_pairs += 1
-                    entity_type_pair_stat[(e1t, e2t)]["num_pos_rels"] += num_pos_
+                    entity_type_pair_stat[(
+                        e1t, e2t)]["num_pos_rels"] += num_pos_
                     entity_type_pair_stat[(e1t, e2t)]["num_pos_pairs"] += 1
                     for rel_name in relation_names:
                         per_rel_stat[rel_name] += 1
 
             return num_pos_rels, num_pos_pairs, num_neg_pairs, entity_type_pair_stat, per_rel_stat
-        
 
         if training == True:
+
             with open(data_path + "/train.json") as f:
-                #try:
+                # try:
                 train_json = json.loads(f.read())
-                
+
                 for data in tqdm(train_json[:]):
-                    processed_data = preprocess(data, tokenizer, max_text_length, self.relation_map, lowercase, full_annotation)
+                    processed_data = preprocess(
+                        data, tokenizer, max_text_length, self.relation_map, lowercase, full_annotation)
+                    # print(processed_data)
+                    sys.stdout.flush()
                     self.train.extend(processed_data)
-                
-                num_pos_rels, num_pos_pairs, num_neg_pairs, entity_type_pair_stat, per_rel_stat = calculate_stat(self.train)
+                num_pos_rels, num_pos_pairs, num_neg_pairs, entity_type_pair_stat, per_rel_stat = calculate_stat(
+                    self.train)
                 self.logger.info(f"=======================================")
                 self.logger.info(f"Training: # of docs = {len(train_json)}")
                 self.logger.info(f"          # of pairs = {len(self.train)}")
@@ -283,16 +296,18 @@ class Dataloader(object):
                 for rel_name in per_rel_stat:
                     self.logger.info(f"          {rel_name}: # of labels = {per_rel_stat[rel_name]}")
                 self.logger.info(f"=======================================")
-                #except:
+                # except:
                 #    pass
         with open(data_path + "/valid.json") as f:
-            #try:
+            # try:
             valid_json = json.loads(f.read())
             for data in tqdm(valid_json[:]):
-                processed_data = preprocess(data, tokenizer, max_text_length, self.relation_map, lowercase, full_annotation)
-                self.val.extend(processed_data)  
+                processed_data = preprocess(
+                    data, tokenizer, max_text_length, self.relation_map, lowercase, full_annotation)
+                self.val.extend(processed_data)
 
-            num_pos_rels, num_pos_pairs, num_neg_pairs, entity_type_pair_stat, per_rel_stat = calculate_stat(self.val)
+            num_pos_rels, num_pos_pairs, num_neg_pairs, entity_type_pair_stat, per_rel_stat = calculate_stat(
+                self.val)
             self.logger.info(f"=======================================")
             self.logger.info(f"Valid:    # of docs = {len(valid_json)}")
             self.logger.info(f"          # of pairs = {len(self.val)}")
@@ -308,16 +323,19 @@ class Dataloader(object):
             for rel_name in per_rel_stat:
                 self.logger.info(f"          {rel_name}: # of labels = {per_rel_stat[rel_name]}")
             self.logger.info(f"=======================================")
-            #except:
+            # except:
             #    pass
+        # print(len(self.train))
         with open(data_path + "/test.json") as f:
-            #try:
+            # try:
             test_json = json.loads(f.read())
             for data in tqdm(test_json[:]):
-                processed_data = preprocess(data, tokenizer, max_text_length, self.relation_map, lowercase, full_annotation)
+                processed_data = preprocess(
+                    data, tokenizer, max_text_length, self.relation_map, lowercase, full_annotation)
                 self.test.extend(processed_data)
 
-            num_pos_rels, num_pos_pairs, num_neg_pairs, entity_type_pair_stat, per_rel_stat = calculate_stat(self.test)
+            num_pos_rels, num_pos_pairs, num_neg_pairs, entity_type_pair_stat, per_rel_stat = calculate_stat(
+                self.test)
             self.logger.info(f"=======================================")
             self.logger.info(f"Test:     # of docs = {len(test_json)}")
             self.logger.info(f"          # of pairs = {len(self.test)}")
@@ -343,10 +361,11 @@ class Dataloader(object):
         self.num_trained_data = 0
         random.seed(seed)
         random.shuffle(self.train)
-    
+        # print(len(self.train))
+        # sys.stdout.flush()
+
     def __len__(self):
         return self._datasize
-    
 
     def __iter__(self):
         while True:
@@ -354,7 +373,8 @@ class Dataloader(object):
                 random.shuffle(self.train)
                 self._idx = 0
             batch = self.train[self._idx:(self._idx+self._bz)]
-            input_array, pad_array, label_array, ep_mask, e1_indicator, e2_indicator = [], [], [], [], [], []
+            input_array, pad_array, label_array, ep_mask, e1_indicator, e2_indicator = [
+            ], [], [], [], [], []
             input_lengths = []
             for b in batch:
                 input_lengths.append(b["input_length"])
@@ -364,7 +384,9 @@ class Dataloader(object):
 
                 e1_indicator.append(b["e1_indicators"])
                 e2_indicator.append(b["e2_indicators"])
-                ep_mask_ = np.full((self.max_text_length, self.max_text_length), -1e20) # (text_length, text_length)
+                # (text_length, text_length)
+                ep_mask_ = np.full(
+                    (self.max_text_length, self.max_text_length), -1e20)
                 ep_outer = 1 - np.outer(b["e1_indicators"], b["e2_indicators"])
                 ep_mask_ = ep_mask_ * ep_outer
                 # print(b["e1_indicators"])
@@ -380,18 +402,24 @@ class Dataloader(object):
                 ep_mask.append(ep_mask_)
 
             #print(input_array[0], np.where(ep_mask[0] == 0.0), label_array[0])
-            #sys.stdout.flush()
+            # sys.stdout.flush()
             max_length = int(np.max(input_lengths))
 
-            input_ids = torch.tensor(np.array(input_array)[:, :max_length], dtype=torch.long)
-            token_type_ids = torch.zeros_like(input_ids[:, :max_length], dtype=torch.long)
-            attention_mask = torch.tensor(np.array(pad_array)[:, :max_length], dtype=torch.long)
-            label_array = torch.tensor(np.array(label_array), dtype=torch.float)
-            ep_mask = torch.tensor(np.array(ep_mask)[:,:max_length, :max_length], dtype=torch.float)
-            e1_indicator = torch.tensor(np.array(e1_indicator)[:, :max_length], dtype=torch.float)
-            e2_indicator = torch.tensor(np.array(e2_indicator)[:, :max_length], dtype=torch.float)
+            input_ids = torch.tensor(np.array(input_array)[
+                                     :, :max_length], dtype=torch.long)
+            token_type_ids = torch.zeros_like(
+                input_ids[:, :max_length], dtype=torch.long)
+            attention_mask = torch.tensor(
+                np.array(pad_array)[:, :max_length], dtype=torch.long)
+            label_array = torch.tensor(
+                np.array(label_array), dtype=torch.float)
+            ep_mask = torch.tensor(
+                np.array(ep_mask)[:, :max_length, :max_length], dtype=torch.float)
+            e1_indicator = torch.tensor(np.array(e1_indicator)[
+                                        :, :max_length], dtype=torch.float)
+            e2_indicator = torch.tensor(np.array(e2_indicator)[
+                                        :, :max_length], dtype=torch.float)
 
             self._idx += self._bz
             self.num_trained_data += self._bz
             yield self.num_trained_data, (input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator, label_array)
-        

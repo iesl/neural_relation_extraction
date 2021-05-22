@@ -212,12 +212,6 @@ class IntOrPercent(click.ParamType):
     help="seed for random number generator",
 )
 @click.option(
-    "--eval_na / --not_eval_na",
-    default=False,
-    help="eval_NA will evaluate NA during test. If --multi_label is True, this flags will be ignored." 
-    + "Usually set to false. For example, Tacred only uses micro F1 and the evaluation does not include sentence when the ground truth is NA and prediction is also NA. Same for BRAN"
-)
-@click.option(
     "--cuda / --no_cuda",
     default=True,
     help="enable/disable CUDA (eg. no nVidia GPU)",
@@ -249,13 +243,14 @@ def main(**config):
     else:
         best_metric_threshold = trainer.load_model()
         trainer.model.eval()
-        macro_perf, micro_perf, categ_micro_perf, not_na_perf, per_rel_perf = trainer.test(test=True, best_metric_threshold=best_metric_threshold)
-        logger.info(f"Test: Macro Precision={macro_perf['P']}, Macro Recall={macro_perf['R']}, Macro F1={macro_perf['F']}")
-        logger.info(f"Test: Micro Precision={micro_perf['P']}, Micro Recall={micro_perf['R']}, Micro F1={micro_perf['F']}")
-        logger.info(f"Test: Categorical Micro Precision={categ_micro_perf['P']}, Micro Recall={categ_micro_perf['R']}, Micro F1={categ_micro_perf['F']}")
-        logger.info(f"Test: not_na Precision={not_na_perf['P']}, not_na Recall={not_na_perf['R']}, not_na F1={not_na_perf['F']}")
+        macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = trainer.test(test=True, best_metric_threshold=best_metric_threshold)
+        logger.info(f"Test: Macro P={macro_perf['P']}, Macro R={macro_perf['R']}, Macro F1={macro_perf['F']}")
+        logger.info(f"Test: Micro P={micro_perf['P']}, Micro R={micro_perf['R']}, Micro F1={micro_perf['F']}")
+        logger.info(f"Test: Categorical Accuracy={categ_acc}, Categorical Macro P={categ_macro_perf['P']}, Macro R={categ_macro_perf['R']}, Macro F1={categ_macro_perf['F']}")
+        logger.info(f"Test: na Accuracy={na_acc}, not_na P={not_na_perf['P']}, not_na R={not_na_perf['R']}, not_na F1={not_na_perf['F']}")
+        logger.info(f"Test: na P={na_perf['P']}, na R={na_perf['R']}, na F1={na_perf['F']}")
         for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
-            logger.info(f"TEST: {rel_name}, Precision={pp}, Recall={rr}, F1={ff}, threshold={tt} (threshold not used for multiclass)")
+            logger.info(f"TEST: {rel_name}, P={pp}, R={rr}, F1={ff}, threshold={tt} (threshold not used for multiclass)")
     logger.info("Program finished")
     
 

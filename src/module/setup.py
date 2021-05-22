@@ -120,8 +120,6 @@ def setup(config):
     if isinstance(config["warmup"], float):
         config["warmup"] = config["max_num_steps"]  * config["warmup"]
         logger.info(f"warmup {config['warmup']}")
-    if config["multi_label"] == True:
-        config["eval_na"] = False
 
 
     return data, model, device, logger
