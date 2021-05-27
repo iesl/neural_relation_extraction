@@ -1,11 +1,12 @@
-import os
-os.environ['TRANSFORMERS_CACHE']=os.environ['BIORE_OUTPUT_ROOT'] + '/.cache/huggingface/'
-
-import sys
-import json
-import click
-from module.train import Trainer
 from module.setup import setup
+from module.train import Trainer
+import click
+import json
+import sys
+import os
+os.environ['TRANSFORMERS_CACHE'] = os.environ['BIORE_OUTPUT_ROOT'] + \
+    '/.cache/huggingface/'
+
 
 class IntOrPercent(click.ParamType):
     name = "click_union"
@@ -33,6 +34,7 @@ class IntOrPercent(click.ParamType):
         except ValueError:
             self.fail(f"{value!r} is not a valid integer or float", param, ctx)
 
+
 @click.command(
     context_settings=dict(show_default=True),
 )
@@ -56,7 +58,7 @@ class IntOrPercent(click.ParamType):
 @click.option(
     "--encoder_type",
     type=click.Choice(
-        ["bert-base-cased", "bert-base-uncased" , "bert-large-cased", "bert-large-uncased",
+        ["bert-base-cased", "bert-base-uncased", "bert-large-cased", "bert-large-uncased",
          "roberta-large", "roberta-base", "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract"],
         case_sensitive=False,
     ),
@@ -84,9 +86,9 @@ class IntOrPercent(click.ParamType):
         case_sensitive=False,
     ),
     default="0",
-    help="na_mode" 
+    help="na_mode"
     + "0: na as a vector / box"
-    + "1: has a binary classifier on top for no_relation detection, and then cascade another layer of softmax" 
+    + "1: has a binary classifier on top for no_relation detection, and then cascade another layer of softmax"
     + "2: hardcoded constraint that type box should be inside not_na box (will be equivalent to 2 for nn / biaffine)"
     + "3: regularizing type boxes to be inside not_na box (will be equivalent to 2 for nn / biaffine)"
     + "4: 2 + 3 (will be equivalent to 2 for nn / biaffine)"
@@ -114,7 +116,7 @@ class IntOrPercent(click.ParamType):
     "--full_annotation / --partial_annotation",
     default=True,
     help="full_annotation means all unlabeled pairs indicate no relation; "
-     + "partial_annotation means we don't train or evaluate on unlabeled pairs."
+    + "partial_annotation means we don't train or evaluate on unlabeled pairs."
 )
 @click.option(
     "--train_batch_size",
@@ -146,7 +148,7 @@ class IntOrPercent(click.ParamType):
     type=int,
     default=512,
     help="dimension of last layer feature before the score function "
-     + "(e.g., dimension of biaffine layer, dimension of boxes)",
+    + "(e.g., dimension of biaffine layer, dimension of boxes)",
 )
 @click.option(
     "--learning_rate",
@@ -206,6 +208,24 @@ class IntOrPercent(click.ParamType):
     "(default: -1.0, no warmup, constant learning rate",
 )
 @click.option(
+    "--lambda",
+    type=float,
+    default=2.0,
+    help="",
+)
+@click.option(
+    "--m_pos",
+    type=float,
+    default=2.5,
+    help="",
+)
+@click.option(
+    "--m_neg",
+    type=float,
+    default=0.5,
+    help="",
+)
+@click.option(
     "--seed",
     type=int,
     default=0,
@@ -221,11 +241,17 @@ class IntOrPercent(click.ParamType):
     default=False,
     help="enable/disable wandb",
 )
+@click.option(
+    "--save_embedding / --not_save_embedding",
+    default=False,
+    help="enable / disable to save sentence embeddings for dev set and relation matrix",
+)
 def main(**config):
 
     if config["output_path"] != "" and config["train"] == False:
         config_path = os.path.join(config["output_path"], 'log')
-        config_str = open(config_path).read().split('\n')[1].split(' - ')[1].replace("'", '"').replace("True", "true").replace("False", "false")
+        config_str = open(config_path).read().split('\n')[1].split(
+            ' - ')[1].replace("'", '"').replace("True", "true").replace("False", "false")
         config_load = json.loads(config_str)
         config_load["train"] = config["train"]
         config_load["wandb"] = config["wandb"]
@@ -243,16 +269,13 @@ def main(**config):
     else:
         best_metric_threshold = trainer.load_model()
         trainer.model.eval()
-        macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = trainer.test(test=True, best_metric_threshold=best_metric_threshold)
-        logger.info(f"Test: Macro P={macro_perf['P']}, Macro R={macro_perf['R']}, Macro F1={macro_perf['F']}")
-        logger.info(f"Test: Micro P={micro_perf['P']}, Micro R={micro_perf['R']}, Micro F1={micro_perf['F']}")
-        logger.info(f"Test: Categorical Accuracy={categ_acc}, Categorical Macro P={categ_macro_perf['P']}, Macro R={categ_macro_perf['R']}, Macro F1={categ_macro_perf['F']}")
-        logger.info(f"Test: na Accuracy={na_acc}, not_na P={not_na_perf['P']}, not_na R={not_na_perf['R']}, not_na F1={not_na_perf['F']}")
-        logger.info(f"Test: na P={na_perf['P']}, na R={na_perf['R']}, na F1={na_perf['F']}")
-        for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
-            logger.info(f"TEST: {rel_name}, P={pp}, R={rr}, F1={ff}, threshold={tt} (threshold not used for multiclass)")
+        macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = trainer.test(
+            test=True, best_metric_threshold=best_metric_threshold)
+        trainer.local_logging(micro_perf, macro_perf, categ_acc, categ_macro_perf,
+                              na_acc, not_na_perf, na_perf, per_rel_perf, 0, label="TEST")
+
     logger.info("Program finished")
-    
+
 
 if __name__ == "__main__":
     main()

@@ -70,6 +70,43 @@ class Trainer(object):
         self.model.load_state_dict(checkpoint['model'])
         return checkpoint['threshold']
 
+    def save_dev_embedding(self):
+        pass
+        # output_path = os.path.join(
+        #     self.config["output_path"], 'vectors_valid.pkl')
+        # data = self.data.val
+        # vectors_valid = np.zeros()
+        # labels_valid = np.zeros()
+        # open(output_path, 'wb').write(
+        #     {"vectors": vectors_valid, "labels": labels_valid, "relation_mat": relation_matrix})
+
+    def wandb_logging(self, micro_perf, macro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, label="dev"):
+        wandb.log(
+            {'Micro F1 ' + label: micro_perf["F"], "Micro P " + label: micro_perf["P"], "Micro R " + label: micro_perf["R"]})
+        wandb.log(
+            {'Macro F1 ' + label: macro_perf["F"], "Macro P " + label: macro_perf["P"], "Macro R " + label: macro_perf["R"]})
+        wandb.log(
+            {'Categorical Acc ' + label: categ_acc, 'Categorical Macro F1 ' + label: categ_macro_perf["F"], "Categorical Macro P " + label: categ_macro_perf["P"], "Categorical Macro R " + label: categ_macro_perf["R"]})
+        wandb.log(
+            {'na Acc ' + label: na_acc, "not_na P " + label: not_na_perf["P"], "not_na R " + label: not_na_perf["R"], 'not_na F1 ' + label: not_na_perf["F"]})
+        wandb.log(
+            {"na P " + label: na_perf["P"], "na R " + label: na_perf["R"], 'na F1 ' + label: na_perf["F"]})
+
+    def local_logging(self, micro_perf, macro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf, i, label="DEV"):
+        self.logger.info(
+            f"{i * 100 / len(self.data)} % {label}: Micro P={micro_perf['P']}, Micro R={micro_perf['R']}, Micro F1 ={micro_perf['F']}")
+        self.logger.info(
+            f"{i * 100 / len(self.data)} % {label}: Macro P={macro_perf['P']}, Macro R={macro_perf['R']}, Macro F1 ={macro_perf['F']}")
+        self.logger.info(
+            f"{i * 100 / len(self.data)} % {label}: Categorical Accuracy={categ_acc}, Categorical Macro P={categ_macro_perf['P']}, Categorical Macro R={categ_macro_perf['R']}, Categorical Macro F1 ={categ_macro_perf['F']}")
+        self.logger.info(
+            f"{i * 100 / len(self.data)} % {label}: not_na Accuracy={na_acc}, not_na P={not_na_perf['P']}, not_na R={not_na_perf['R']}, not_na F1 ={not_na_perf['F']}")
+        self.logger.info(
+            f"{i * 100 / len(self.data)} % {label} na P={na_perf['P']}, na R={na_perf['R']}, na F1 ={na_perf['F']}")
+        for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
+            self.logger.info(
+                f"{i * 100 / len(self.data)} % {label}: {rel_name}, P={pp}, R={rr}, F1={ff}, threshold={tt} (threshold not used for multiclass)")
+
     def train(self):
         if self.config["wandb"]:
             wandb.init(project="re", settings=wandb.Settings(
@@ -107,8 +144,8 @@ class Trainer(object):
             ep_mask = ep_mask.to(self.device)
             e1_indicator = e1_indicator.to(self.device)
             e2_indicator = e2_indicator.to(self.device)
-            scores = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
-                                e1_indicator, e2_indicator)  # (batchsize, R) or (batchsize, R+1)
+            scores, _ = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                                   e1_indicator, e2_indicator)  # (batchsize, R) or (batchsize, R+1)
             if self.config["multi_label"] == True:
                 loss = loss_func(scores, label_array.to(self.device))
             else:
@@ -133,6 +170,16 @@ class Trainer(object):
                     [label_array, 1 - (label_array.sum(1, keepdim=True) > 0).float()], dim=1)
                 label_array = label_array.argmax(1)  # (batchsize,)
                 loss += loss_func(scores, label_array.to(self.device))
+
+                # ranking loss from "Classifying Relations by Ranking with Convolutional Neural Networks"
+                # label_not_NA = (label_array.sum(1) != 0).to(
+                #     self.device)  # (batchsize, )
+                # pos_score = (label_array.to(self.device) *
+                #              scores[:, :-1]).sum(1)  # (batchsize, )
+                # neg_score = (1 - label_array.to(self.device)) * \
+                #     scores[:, :-1]  # (batchsize, R)
+                # loss = (label_not_NA * torch.log(1 + torch.exp(self.config["lambda"] * (self.config["m_pos"] - pos_score)))).mean(
+                # ) + torch.log(1 + torch.exp(self.config["lambda"] * (self.config["m_neg"] + neg_score))).mean()  # (batchsize, )
 
             if self.config["na_mode"] in ["3", "4"] and self.config["score_func"] == "box":
                 log_not_na_given_rel = self.model.prob_not_na_given_r()  # P(not_na | R): (R, )
@@ -183,38 +230,26 @@ class Trainer(object):
                 # per_rel_perf is a list of length of (number of relation types + 1)
                 macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = self.test(
                     test=False)
-                print("val", micro_perf["F"], categ_acc, not_na_perf["F"])
+                print("val", micro_perf["F"], not_na_perf["F"])
                 sys.stdout.flush()
 
                 if micro_perf["F"] > best_metric or i == self.config["train_batch_size"]:
                     if self.config["wandb"]:
-                        wandb.log(
-                            {'Micro F1 dev': micro_perf["F"], "Micro P dev": micro_perf["P"], "Micro R dev": micro_perf["R"]})
-                        wandb.log(
-                            {'Macro F1 dev': macro_perf["F"], "Macro P dev": macro_perf["P"], "Macro R dev": macro_perf["R"]})
-                        wandb.log(
-                            {'Categorical Acc dev': categ_acc, 'Categorical Macro F1 dev': categ_macro_perf["F"], "Categorical Macro P dev": categ_macro_perf["P"], "Categorical Macro R dev": categ_macro_perf["R"]})
-                        wandb.log(
-                            {'na Acc dev': na_acc, "not_na P dev": not_na_perf["P"], "not_na R dev": not_na_perf["R"], 'not_na F1 dev': not_na_perf["F"]})
-                        wandb.log(
-                            {"na P dev": na_perf["P"], "na R dev": na_perf["R"], 'na F1 dev': na_perf["F"]})
+                        self.wandb_logging(micro_perf, macro_perf, categ_acc,
+                                           categ_macro_perf, na_acc, not_na_perf, na_perf, label="dev")
+
                     best_metric = micro_perf["F"]
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV (a new best): Macro P={macro_perf['P']}, Macro R={macro_perf['R']}, Macro F1 ={macro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV (a new best): Micro P={micro_perf['P']}, Micro R={micro_perf['R']}, Micro F1 ={micro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV (a new best): Categorical Accuracy={categ_acc}, Categorical Macro P={categ_macro_perf['P']}, Categorical Macro R={categ_macro_perf['R']}, Categorical Macro F1 ={categ_macro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV (a new best): not_na Accuracy={na_acc}, not_na P={not_na_perf['P']}, not_na R={not_na_perf['R']}, not_na F1 ={not_na_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV (a new best): na P={na_perf['P']}, na R={na_perf['R']}, na F1 ={na_perf['F']}")
+                    self.local_logging(micro_perf, macro_perf, categ_acc, categ_macro_perf, na_acc,
+                                       not_na_perf, na_perf, per_rel_perf, i, label="DEV (a new best)")
+
+                    #     best_metric_threshold[rel_name] = tt
                     for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
-                        self.logger.info(
-                            f"{i * 100 / len(self.data)} % DEV (a new best): {rel_name}, P={pp}, R={rr}, F1={ff}, threshold={tt} (threshold not used for multiclass)")
                         best_metric_threshold[rel_name] = tt
                     patience = 0
                     self.save_model(best_metric_threshold)
+
+                    if self.config["save_embedding"] == True:
+                        self.save_dev_embedding()
 
                     # evaluate on test set
                     macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = self.test(
@@ -222,44 +257,15 @@ class Trainer(object):
                     print("test", micro_perf["F"])
                     sys.stdout.flush()
                     if self.config["wandb"]:
-                        wandb.log(
-                            {'Micro F1 test': micro_perf["F"], "Micro P test": micro_perf["P"], "Micro R test": micro_perf["R"]})
-                        wandb.log(
-                            {'Macro F1 test': macro_perf["F"], "Macro P test": macro_perf["P"], "Macro R test": macro_perf["R"]})
-                        wandb.log(
-                            {'Categorical Acc test': categ_acc, 'Categorical Macro F1 test': categ_macro_perf["F"], "Categorical Macro P test": categ_macro_perf["P"], "Categorical Macro R test": categ_macro_perf["R"]})
-                        wandb.log(
-                            {'na Acc test': na_acc, 'not_na F1 test': not_na_perf["F"], "not_na P test": not_na_perf["P"], "not_na R test": not_na_perf["R"]})
-                        wandb.log(
-                            {'na F1 test': na_perf["F"], "na P test": na_perf["P"], "na R test": na_perf["R"]})
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % TEST: Macro P={macro_perf['P']}, Macro R={macro_perf['R']}, Macro F1 ={macro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % TEST: Micro P={micro_perf['P']}, Micro R={micro_perf['R']}, Micro F1 ={micro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % TEST: Categorical Accuracy={categ_acc}, Categorical Macro P={categ_macro_perf['P']}, Categorical Macro R={categ_macro_perf['R']}, Categorical Macro F1 ={categ_macro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % TEST: na Accuracy={na_acc}, not_na P={not_na_perf['P']}, not_na R={not_na_perf['R']}, not_na F1 ={not_na_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % TEST: na P={na_perf['P']}, na R={na_perf['R']}, na F1 ={na_perf['F']}")
-                    for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
-                        self.logger.info(
-                            f"{i * 100 / len(self.data)} % TEST: {rel_name}, P={pp}, R={rr}, F1={ff}, threshold={tt} (threshold not used for multiclass)")
+                        self.wandb_logging(micro_perf, macro_perf, categ_acc,
+                                           categ_macro_perf, na_acc, not_na_perf, na_perf, label="test")
+                    self.local_logging(micro_perf, macro_perf, categ_acc, categ_macro_perf,
+                                       na_acc, not_na_perf, na_perf, per_rel_perf, i, label="TEST")
 
                 else:
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV: Macro P={macro_perf['P']}, Macro R={macro_perf['R']}, Macro F1={macro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV: Micro P={micro_perf['P']}, Micro R={micro_perf['R']}, Micro F1={micro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV: Categorical Accuracy={categ_acc}, Categorical Macro P={categ_macro_perf['P']}, Categorical Micro R={categ_macro_perf['R']}, Categorical Macro F1={categ_macro_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV: na Accuracy={na_acc}, not_na P={not_na_perf['P']}, not_na R={not_na_perf['R']}, not_na F1={not_na_perf['F']}")
-                    self.logger.info(
-                        f"{i * 100 / len(self.data)} % DEV: na P={na_perf['P']}, na R={na_perf['R']}, na F1={na_perf['F']}")
-                    for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
-                        self.logger.info(
-                            f"{i * 100 / len(self.data)} % DEV: {rel_name}, P={pp}, R={rr}, F1={ff}, threshold={tt} (threshold not used for multiclass)")
+                    self.local_logging(micro_perf, macro_perf, categ_acc, categ_macro_perf,
+                                       na_acc, not_na_perf, na_perf, per_rel_perf, i, label="DEV")
+
                     patience += 1
 
             # early stop
@@ -278,29 +284,11 @@ class Trainer(object):
         print("test", micro_perf["F"])
         sys.stdout.flush()
         if self.config["wandb"]:
-            wandb.log(
-                {'Micro F1 test': micro_perf["F"], "Micro P test": micro_perf["P"], "Micro R test": micro_perf["R"]})
-            wandb.log(
-                {'Macro F1 test': macro_perf["F"], "Macro P test": macro_perf["P"], "Macro R test": macro_perf["R"]})
-            wandb.log(
-                {'Categorical Acc test': categ_acc, 'Categorical Macro F1 test': categ_macro_perf["F"], "Categorical Macro P test": categ_macro_perf["P"], "Categorical Macro R test": categ_macro_perf["R"]})
-            wandb.log(
-                {'na Acc test': na_acc, 'not_na F1 test': not_na_perf["F"], "not_na P test": not_na_perf["P"], "not_na R test": not_na_perf["R"]})
-            wandb.log(
-                {'na F1 test': na_perf["F"], "na P test": na_perf["P"], "na R test": na_perf["R"]})
-        self.logger.info(
-            f"Test: Macro P={macro_perf['P']}, Macro R={macro_perf['R']}, Macro F1={macro_perf['F']}")
-        self.logger.info(
-            f"Test: Micro P={micro_perf['P']}, Micro R={micro_perf['R']}, Micro F1={micro_perf['F']}")
-        self.logger.info(
-            f"Test: Categorical Accuracy={categ_acc}, Categorical Macro P={categ_macro_perf['P']}, Categorical Macro R={categ_macro_perf['R']}, Categorical Macro F1={categ_macro_perf['F']}")
-        self.logger.info(
-            f"Test: na Accuracy={na_acc}, not_na P={not_na_perf['P']}, not_na R={not_na_perf['R']}, not_na F1={not_na_perf['F']}")
-        self.logger.info(
-            f"Test: na P={na_perf['P']}, na R={na_perf['R']}, na F1={na_perf['F']}")
-        for rel_name, (pp, rr, ff, tt) in per_rel_perf.items():
-            self.logger.info(
-                f"TEST: {rel_name}, P={pp}, R={rr}, F1={ff}, threshold={tt}")
+            self.wandb_logging(micro_perf, macro_perf, categ_acc,
+                               categ_macro_perf, na_acc, not_na_perf, na_perf, label="test")
+
+        self.local_logging(micro_perf, macro_perf, categ_acc, categ_macro_perf,
+                           na_acc, not_na_perf, na_perf, per_rel_perf, 0, label="TEST")
 
         if self.config["wandb"]:
             wandb.finish()
@@ -494,8 +482,9 @@ class Trainer(object):
                     ep_mask = torch.tensor(
                         ep_mask[:, :max_length, :max_length], dtype=torch.float).to(self.device)
 
-                    score = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
-                                       e1_indicator, e2_indicator).detach().cpu().numpy()  # (b, R) or (b, R+1)
+                    score, _ = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                                          e1_indicator, e2_indicator)  # (b, R) or (b, R+1)
+                    score = score.detach().cpu().numpy()
                     #print(input_ids.shape, ep_mask.shape, score.shape, i+1-len(input_array), i+1, len(labels))
                     sys.stdout.flush()
 
@@ -515,6 +504,16 @@ class Trainer(object):
                                 score.shape[0]), np.argmax(score, 1)] = 1
                             # (batchsize, R), become NA if all-zero
                             prediction = prediction[:, :-1]
+
+                            # (num_test, )
+
+                            # # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
+                            # prediction_categ = np.zeros_like(
+                            #     score[:, :-1])
+                            # prediction_categ[np.arange(
+                            #     score.shape[0]), np.argmax(score[:, :-1], 1)] = 1
+                            # prediction = np.where((score[:, :-1] > 0).sum(
+                            #     1)[:, None] > 0, prediction_categ, np.zeros_like(prediction_categ))
 
                         for j in range(len(input_array)):
                             predict_names = []
@@ -553,6 +552,15 @@ class Trainer(object):
                 predictions_categ = np.zeros_like(scores)[:, :-1]
                 predictions_categ[np.arange(
                     scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
+
+                # # (num_test, )
+                # # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
+                # predictions = np.zeros_like(scores)  # (num_test, R + 1)
+                # predictions_categ = np.zeros_like(scores[:, :-1])
+                # predictions_categ[np.arange(
+                #     scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
+                # predictions = np.where((scores[:, :-1] > 0).sum(
+                #    1)[:, None] > 0, predictions_categ, np.zeros_like(predictions_categ))
 
             results = self.calculate_metrics(
                 predictions, predictions_categ, labels)
@@ -609,6 +617,16 @@ class Trainer(object):
                 predictions_categ = np.zeros_like(scores)[:, :-1]
                 predictions_categ[np.arange(
                     scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
+
+                # # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
+                # predictions = np.zeros_like(scores)  # (num_test, R + 1)
+                # predictions_categ = np.zeros_like(scores[:, :-1])
+                # predictions_categ[np.arange(
+                #     scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
+
+                # (num_test, )
+                # predictions = np.where((scores[:, :-1] > 0).sum(
+                #     1)[:, None] > 0, predictions_categ, np.zeros_like(predictions_categ))
 
             results = self.calculate_metrics(
                 predictions, predictions_categ, labels)
