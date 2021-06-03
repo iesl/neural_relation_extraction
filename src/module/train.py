@@ -6,6 +6,7 @@ from transformers.optimization import get_linear_schedule_with_warmup, get_const
 import os
 import sys
 import json
+import pickle
 from tqdm import tqdm
 import wandb
 from sklearn import metrics
@@ -70,15 +71,23 @@ class Trainer(object):
         self.model.load_state_dict(checkpoint['model'])
         return checkpoint['threshold']
 
-    def save_dev_embedding(self):
-        pass
-        # output_path = os.path.join(
-        #     self.config["output_path"], 'vectors_valid.pkl')
-        # data = self.data.val
-        # vectors_valid = np.zeros()
-        # labels_valid = np.zeros()
-        # open(output_path, 'wb').write(
-        #     {"vectors": vectors_valid, "labels": labels_valid, "relation_mat": relation_matrix})
+    def save_dev_embedding(self, valid_vectors, valid_labels, valid_predictions):
+        # valid_vectors: valid_size, dim
+        # valid_labels: valid_size, len(relation_map)
+        output_path = os.path.join(
+            self.config["output_path"], 'vectors_valid.pkl')
+        relation_name_list = [r for i, r in sorted(
+            list(self.data.relation_name.items()), key=lambda x:x[0])]
+        with open(output_path, 'wb') as f:
+            if self.config["score_func"] == "cosine":
+                rel_mat = self.model.relation_mat.data.detach().cpu().numpy().T  # R+1, D
+                rel_mat = rel_mat / \
+                    np.linalg.norm(rel_mat, ord=2, axis=1, keepdims=True)
+            else:
+                rel_mat = self.model.layer2.weight.detach().cpu().numpy()  # R+1, D
+            output_data = {"vectors": valid_vectors, "preds": valid_predictions, "label_name": relation_name_list,
+                           "labels": valid_labels, "relation_mat": rel_mat}
+            pickle.dump(output_data, f)
 
     def wandb_logging(self, micro_perf, macro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, label="dev"):
         wandb.log(
@@ -93,6 +102,8 @@ class Trainer(object):
             {"na P " + label: na_perf["P"], "na R " + label: na_perf["R"], 'na F1 ' + label: na_perf["F"]})
 
     def local_logging(self, micro_perf, macro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf, i, label="DEV"):
+        if len(self.data) == 0:
+            self.data = [""]
         self.logger.info(
             f"{i * 100 / len(self.data)} % {label}: Micro P={micro_perf['P']}, Micro R={micro_perf['R']}, Micro F1 ={micro_perf['F']}")
         self.logger.info(
@@ -121,14 +132,73 @@ class Trainer(object):
         elif self.config["multi_label"] == True and self.config["score_func"] == "box":
             def loss_func(input, target): return -(target * input +
                                                    (1 - target) * log1mexp(input)).mean()  # bce log loss
-        elif self.config["multi_label"] == False and self.config['na_mode'] == "0":
-            def loss_func(input, target): return self.celogitloss(
-                input, target)  # input are logits
-        elif self.config["multi_label"] == False and self.config['na_mode'] != "0":
-            def loss_func(input, target): return -input[torch.arange(
-                target.shape[0]).long(), target.long()].mean()  # input are log prob
+        elif self.config["multi_label"] == False:
 
-        best_metric = 0
+            if self.config["classifier"] == "softmax":
+                # regular softmax cross entropy loss
+                def loss_func(input, target):
+                    # input: batchsize, R+1
+                    # target: batchsize, R
+                    target = torch.cat(
+                        [target, 1 - (target.sum(1, keepdim=True) > 0).float()], dim=1)  # (batchsize, R + 1)
+                    input = self.config["rescale_factor"] * input
+                    target = target.argmax(1)
+                    return self.celogitloss(input, target)  # input are logits
+
+            elif self.config["classifier"] == "softmax_margin":
+                # softmax with positive margin
+                # https://arxiv.org/abs/1801.09414  equation (4)
+                def loss_func(input, target):
+                    # input: batchsize, R+1
+                    # target: batchsize, R
+                    target = torch.cat(
+                        [target, 1 - (target.sum(1, keepdim=True) > 0).float()], dim=1)  # (batchsize, R + 1)
+                    input = self.config["rescale_factor"] * \
+                        (input - target * self.config["margin"])
+                    target = target.argmax(1)
+                    return self.celogitloss(input, target)
+
+            elif self.config["classifier"] == "pairwise_margin":
+                # ranking loss from "Classifying Relations by Ranking with Convolutional Neural Networks"
+                def loss_func(input, target):
+                    # input: batchsize, R+1
+                    # target: batchsize, R
+                    target = torch.cat(
+                        [target, 1 - (target.sum(1, keepdim=True) > 0).float()], dim=1)  # (batchsize, R + 1)
+                    pos_input = (target.to(self.device) *
+                                 input).sum(1)  # (batchsize, )
+                    neg_input = (1 - target.to(self.device)) * \
+                        input  # (batchsize, R + 1)
+
+                    # positive score should be greater than pairwise_margin_pos,
+                    # negative score should be less than -pairwise_margin_neg
+                    # for dot product, pairwise_margin_pos could be 2.5, pairwise_margin_neg could be 0.5
+                    # for cosine, pairwise_margin_pos could be 0.3, pairwise_margin_neg could be 0.1
+                    loss = torch.nn.functional.softplus(self.config["rescale_factor"] * (self.config["margin_pos"] - pos_input)).mean(
+                    ) + torch.nn.functional.softplus(self.config["rescale_factor"] * (self.config["margin_neg"] + neg_input)).mean()  # (batchsize, )
+                    return loss
+
+            elif self.config["classifier"] == "pairwise_margin_na":
+                # ranking loss from "Classifying Relations by Ranking with Convolutional Neural Networks"
+                def loss_func(input, target):
+                    # input: batchsize, R+1
+                    # target: batchsize, R
+                    label_not_NA = (target.sum(1) != 0).to(
+                        self.device)  # (batchsize, )
+                    pos_input = (target.to(self.device) *
+                                 input[:, :-1]).sum(1)  # (batchsize, )
+                    neg_input = (1 - target.to(self.device)) * \
+                        input[:, :-1]  # (batchsize, R)
+
+                    # positive score should be greater than pairwise_margin_pos,
+                    # negative score should be less than -pairwise_margin_neg
+                    # for dot product, pairwise_margin_pos could be 2.5, pairwise_margin_neg could be 0.5
+                    # for cosine, pairwise_margin_pos could be 0.3, pairwise_margin_neg could be 0.1
+                    loss = (label_not_NA * torch.nn.functional.softplus(self.config["rescale_factor"] * (self.config["margin_pos"] - pos_input))).mean(
+                    ) + torch.nn.functional.softplus(self.config["rescale_factor"] * (self.config["margin_neg"] + neg_input)).mean()  # (batchsize, )
+                    return loss
+
+        best_metric = -1
         best_metric_threshold = {}
         patience = 0
         rolling_loss = []
@@ -149,42 +219,8 @@ class Trainer(object):
             if self.config["multi_label"] == True:
                 loss = loss_func(scores, label_array.to(self.device))
             else:
-                loss = 0
-                if self.config["na_mode"] != "0":
-                    pos_label = (label_array.sum(1, keepdim=True) > 0).float().to(
-                        self.device)  # (batchsize, )
-                    neg_label = 1.0 - pos_label  # (batchsize, )
-                    neg_log_prob = scores[:, -1]  # (batchsize, )
-                    pos_log_prob = log1mexp(neg_log_prob)
-                    loss += self.config["na_weight"] * \
-                        (- pos_label * pos_log_prob -
-                         neg_label * neg_log_prob).mean()
-
-                    # (batchsize, R)
-                    categorical_log_prob = scores[:,
-                                                  :-1] - pos_log_prob[:, None]
-                    loss += self.config["categorical_weight"] * (- label_array.to(
-                        self.device) * categorical_log_prob).sum(1).mean()
-
-                label_array = torch.cat(
-                    [label_array, 1 - (label_array.sum(1, keepdim=True) > 0).float()], dim=1)
-                label_array = label_array.argmax(1)  # (batchsize,)
-                loss += loss_func(scores, label_array.to(self.device))
-
-                # ranking loss from "Classifying Relations by Ranking with Convolutional Neural Networks"
-                # label_not_NA = (label_array.sum(1) != 0).to(
-                #     self.device)  # (batchsize, )
-                # pos_score = (label_array.to(self.device) *
-                #              scores[:, :-1]).sum(1)  # (batchsize, )
-                # neg_score = (1 - label_array.to(self.device)) * \
-                #     scores[:, :-1]  # (batchsize, R)
-                # loss = (label_not_NA * torch.log(1 + torch.exp(self.config["lambda"] * (self.config["m_pos"] - pos_score)))).mean(
-                # ) + torch.log(1 + torch.exp(self.config["lambda"] * (self.config["m_neg"] + neg_score))).mean()  # (batchsize, )
-
-            if self.config["na_mode"] in ["3", "4"] and self.config["score_func"] == "box":
-                log_not_na_given_rel = self.model.prob_not_na_given_r()  # P(not_na | R): (R, )
-                loss -= self.config["na_box_weight"] * \
-                    log_not_na_given_rel.mean()
+                # (batchsize,)
+                loss = loss_func(scores, label_array.to(self.device))
 
             """back prop"""
             loss = loss / self.config["grad_accumulation_steps"]
@@ -193,12 +229,6 @@ class Trainer(object):
             for param in self.model.parameters():
                 if param.grad is not None:
                     assert not torch.isnan(param.grad).any()
-
-            # # linear warmup
-            # if self.config["warmup"] > 0 and i < self.config["warmup"]:
-            #     #print(float(i) / self.config["warmup"])
-            #     for p in self.opt.param_groups:
-            #         p['lr'] = self.config["learning_rate"] * float(i) / self.config["warmup"]
 
             step = i / (self.config["train_batch_size"])
             if step % self.config["grad_accumulation_steps"] == 0:
@@ -217,21 +247,28 @@ class Trainer(object):
             if step % 100 == 0:
                 self.logger.info(
                     f"{i}-th example loss: {np.mean(rolling_loss)}")
-                print(f"{i}-th example loss: {np.mean(rolling_loss)}")
+                # print(f"{i}-th example loss: {np.mean(rolling_loss)}")
                 if self.config["wandb"]:
                     wandb.log({'step': step, 'loss': np.mean(rolling_loss)})
                 rolling_loss = []
 
             # evaluate on dev set (if out-performed, evaluate on test as well)
             if 0 < i % self.config["log_interval"] <= self.config["train_batch_size"]:
-                print(i, self.config["log_interval"], i %
-                      self.config["log_interval"], self.config["train_batch_size"])
+                # print(i, self.config["log_interval"], i %
+                #      self.config["log_interval"], self.config["train_batch_size"])
                 self.model.eval()
+
+                # replace relation matrix with the center of instance of same label.
+                if self.config["score_func"] == "cosine":
+                    label_centers = self.calculate_centers(
+                        self.data.label2train)  # R, D; normalized
+                    self.model.relation_mat.data[:, :-1] = torch.tensor(
+                        label_centers).float().T.to(self.device)
+
                 # per_rel_perf is a list of length of (number of relation types + 1)
-                macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = self.test(
-                    test=False)
-                print("val", micro_perf["F"], not_na_perf["F"])
-                sys.stdout.flush()
+                macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf, valid_vectors, valid_labels, valid_preds, _ = self.test(
+                    test_mode=False)
+                self.logger.info(f'val: {micro_perf["F"]}, {not_na_perf["F"]}')
 
                 if micro_perf["F"] > best_metric or i == self.config["train_batch_size"]:
                     if self.config["wandb"]:
@@ -248,13 +285,14 @@ class Trainer(object):
                     patience = 0
                     self.save_model(best_metric_threshold)
 
-                    if self.config["save_embedding"] == True:
-                        self.save_dev_embedding()
+                    if self.config["save_embedding"] == True and self.config["score_func"] in ["dot", "cosine"]:
+                        self.save_dev_embedding(
+                            valid_vectors, valid_labels, valid_preds)
 
                     # evaluate on test set
-                    macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = self.test(
-                        test=True, best_metric_threshold=best_metric_threshold)
-                    print("test", micro_perf["F"])
+                    macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf, _, _, _, _ = self.test(
+                        test_mode=True, best_metric_threshold=best_metric_threshold)
+                    self.logger.info(f'test: {micro_perf["F"]}, {not_na_perf["F"]}')
                     sys.stdout.flush()
                     if self.config["wandb"]:
                         self.wandb_logging(micro_perf, macro_perf, categ_acc,
@@ -277,18 +315,18 @@ class Trainer(object):
                 break
 
         # after finished, load best model and evaluate on test again
-        best_metric_threshold = self.load_model()
-        self.model.eval()
-        macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = self.test(
-            test=True, best_metric_threshold=best_metric_threshold)
-        print("test", micro_perf["F"])
-        sys.stdout.flush()
-        if self.config["wandb"]:
-            self.wandb_logging(micro_perf, macro_perf, categ_acc,
-                               categ_macro_perf, na_acc, not_na_perf, na_perf, label="test")
+        # best_metric_threshold = self.load_model()
+        # self.model.eval()
+        # macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf, _, _, _ = self.test(
+        #     test=True, best_metric_threshold=best_metric_threshold)
+        # print("test", micro_perf["F"])
+        # sys.stdout.flush()
+        # if self.config["wandb"]:
+        #     self.wandb_logging(micro_perf, macro_perf, categ_acc,
+        #                        categ_macro_perf, na_acc, not_na_perf, na_perf, label="test")
 
-        self.local_logging(micro_perf, macro_perf, categ_acc, categ_macro_perf,
-                           na_acc, not_na_perf, na_perf, per_rel_perf, 0, label="TEST")
+        # self.local_logging(micro_perf, macro_perf, categ_acc, categ_macro_perf,
+        #                    na_acc, not_na_perf, na_perf, per_rel_perf, 0, label="TEST")
 
         if self.config["wandb"]:
             wandb.finish()
@@ -408,9 +446,10 @@ class Trainer(object):
 
         return results
 
-    def test(self, test=False, best_metric_threshold=None):
+    def test(self, test_mode=False, best_metric_threshold=None):
 
-        if test == True:
+        # load data
+        if test_mode == True:
             self.logger.debug("This is testing")
             # if in test mode, use existing metric thresholds
             assert best_metric_threshold != None, "evaluation on test data requires best_metric_threshold"
@@ -434,7 +473,7 @@ class Trainer(object):
             threshold_vec = np.zeros(len(self.data.relation_map))
         sys.stdout.flush()
 
-        # getting scores for valid/test data
+        # Infer scores for valid/test data
         with torch.no_grad():
             if self.config["multi_label"] == True:
                 # (num_test, R)
@@ -445,6 +484,8 @@ class Trainer(object):
 
             # (num_test, R)
             labels = np.zeros((len(data), len(self.data.relation_map)))
+            vectors = np.zeros((len(data), self.config["dim"]))
+            docids = []
             self.logger.debug(f"length of data: {len(data)}")
             input_array, pad_array, label_array, e1_indicators, e2_indicators, docid, e1id, e2id, input_lengths = [
             ], [], [], [], [], [], [], [], []
@@ -456,6 +497,7 @@ class Trainer(object):
                 e1_indicators.append(dict_["e1_indicators"])
                 e2_indicators.append(dict_["e2_indicators"])
                 docid.append(dict_["docid"])
+                docids.append(dict_["docid"])
                 e1id.append(dict_["e1"])
                 e2id.append(dict_["e2"])
                 input_lengths.append(dict_["input_length"])
@@ -482,38 +524,47 @@ class Trainer(object):
                     ep_mask = torch.tensor(
                         ep_mask[:, :max_length, :max_length], dtype=torch.float).to(self.device)
 
-                    score, _ = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
-                                          e1_indicator, e2_indicator)  # (b, R) or (b, R+1)
+                    score, vector = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                                               e1_indicator, e2_indicator)  # (b, R) or (b, R+1)
                     score = score.detach().cpu().numpy()
-                    #print(input_ids.shape, ep_mask.shape, score.shape, i+1-len(input_array), i+1, len(labels))
+                    if vector != None:
+                        vector = vector.detach().cpu().numpy()
+                        vectors[(i+1-len(input_array)):(i+1), :] = vector
+
+                    # print(input_ids.shape, ep_mask.shape, score.shape, i+1-len(input_array), i+1, len(labels))
                     sys.stdout.flush()
 
                     scores[(i+1-len(input_array)):(i+1), :] = score
                     labels[(i+1-len(input_array)):(i+1),
                            :] = np.array(label_array)
 
-                    if test == True:
+                    if test_mode == True:
 
                         # in test mode, save predictions for each data point (docid, e1, e2)
                         if self.config["multi_label"] == True:
                             prediction = (score > threshold_vec)  # (b, R)
                         else:
-                            prediction = np.zeros_like(
-                                score)  # (num_test, R + 1)
-                            prediction[np.arange(
-                                score.shape[0]), np.argmax(score, 1)] = 1
-                            # (batchsize, R), become NA if all-zero
-                            prediction = prediction[:, :-1]
 
-                            # (num_test, )
+                            if self.config["classifier"] == "pairwise_margin_na":
+                                # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
+                                prediction_categ = np.zeros_like(
+                                    score[:, :-1])  # (b, R)
+                                prediction_categ[np.arange(
+                                    score.shape[0]), np.argmax(score[:, :-1], 1)] = 1
 
-                            # # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
-                            # prediction_categ = np.zeros_like(
-                            #     score[:, :-1])
-                            # prediction_categ[np.arange(
-                            #     score.shape[0]), np.argmax(score[:, :-1], 1)] = 1
-                            # prediction = np.where((score[:, :-1] > 0).sum(
-                            #     1)[:, None] > 0, prediction_categ, np.zeros_like(prediction_categ))
+                                # if none of the scores above zero, prediction will be NA
+                                # (batchsize, R), predicts NA if prediction[:, :-1] is all-zero
+                                prediction = np.where((score[:, :-1] > 0).sum(
+                                    1)[:, None] > 0, prediction_categ, np.zeros_like(prediction_categ))
+
+                            else:
+                                prediction = np.zeros_like(
+                                    score)  # (num_test, R + 1)
+                                prediction[np.arange(
+                                    score.shape[0]), np.argmax(score, 1)] = 1
+
+                                # (batchsize, R), predicts NA if prediction[:, :-1] is all-zero
+                                prediction = prediction[:, :-1]
 
                         for j in range(len(input_array)):
                             predict_names = []
@@ -536,7 +587,8 @@ class Trainer(object):
                     input_array, pad_array, label_array, e1_indicators, e2_indicators, docid, e1id, e2id, input_lengths = [
                     ], [], [], [], [], [], [], [], []
 
-        if test == True:
+        # calculate metrics for valid/test data
+        if test_mode == True:
             # in test mode, use existing thresholds, save results.
 
             if self.config["multi_label"] == True:
@@ -544,23 +596,31 @@ class Trainer(object):
                 predictions_categ = predictions
             else:
                 # if multi_class, choose argmax when the model predicts multiple labels
-                predictions = np.zeros_like(scores)  # (num_test, R + 1)
-                predictions[np.arange(scores.shape[0]),
-                            np.argmax(scores, 1)] = 1
-                predictions = predictions[:, :-1]  # (batchsize, R)
 
-                predictions_categ = np.zeros_like(scores)[:, :-1]
-                predictions_categ[np.arange(
-                    scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
+                if self.config["classifier"] == "pairwise_margin_na":
+                    # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
+                    predictions = np.zeros_like(scores)  # (num_test, R + 1)
+                    predictions_categ = np.zeros_like(
+                        scores[:, :-1])  # (num_test, R)
+                    predictions_categ[np.arange(
+                        scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
 
-                # # (num_test, )
-                # # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
-                # predictions = np.zeros_like(scores)  # (num_test, R + 1)
-                # predictions_categ = np.zeros_like(scores[:, :-1])
-                # predictions_categ[np.arange(
-                #     scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
-                # predictions = np.where((scores[:, :-1] > 0).sum(
-                #    1)[:, None] > 0, predictions_categ, np.zeros_like(predictions_categ))
+                    # if none of the scores above zero, prediction will be NA
+                    # (num_test, R), predicts NA if prediction[:, :-1] is all-zero
+                    predictions = np.where((scores[:, :-1] > 0).sum(
+                        1)[:, None] > 0, predictions_categ, np.zeros_like(predictions_categ))
+
+                else:
+                    predictions = np.zeros_like(scores)  # (num_test, R + 1)
+                    predictions[np.arange(scores.shape[0]),
+                                np.argmax(scores, 1)] = 1
+
+                    # (num_test, R), predicts NA if prediction[:, :-1] is all-zero
+                    predictions = predictions[:, :-1]
+
+                    predictions_categ = np.zeros_like(scores)[:, :-1]
+                    predictions_categ[np.arange(
+                        scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
 
             results = self.calculate_metrics(
                 predictions, predictions_categ, labels)
@@ -588,10 +648,6 @@ class Trainer(object):
                 log_marginal_prob = log_marginal_prob.detach().cpu().tolist()
                 fout_json["transition_matrix"] = {
                     "log_conditional": log_cond_prob, "log_marginal": log_marginal_prob}
-            #
-
-            fout.write(json.dumps(fout_json, indent="\t"))
-            fout.close()
 
         else:
             if self.config["multi_label"] == True:
@@ -599,7 +655,7 @@ class Trainer(object):
                 for i, rel_name in self.data.relation_name.items():
                     prec_array, recall_array, threshold_array = metrics.precision_recall_curve(
                         labels[:, i], scores[:, i])
-                    #print(prec_array, recall_array, prec_array + recall_array > 0)
+                    # print(prec_array, recall_array, prec_array + recall_array > 0)
                     prec_array_ = np.where(
                         prec_array + recall_array > 0, prec_array, np.ones_like(prec_array))
                     f1_array = np.where(prec_array + recall_array > 0, 2 * prec_array * recall_array / (
@@ -610,23 +666,31 @@ class Trainer(object):
                 predictions_categ = predictions
             else:
                 # if multi_class, choose argmax
-                predictions = np.zeros_like(scores)  # (num_test, R+1)
-                predictions[np.arange(scores.shape[0]),
-                            np.argmax(scores, 1)] = 1
-                predictions = predictions[:, :-1]  # (batchsize, R)
-                predictions_categ = np.zeros_like(scores)[:, :-1]
-                predictions_categ[np.arange(
-                    scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
 
-                # # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
-                # predictions = np.zeros_like(scores)  # (num_test, R + 1)
-                # predictions_categ = np.zeros_like(scores[:, :-1])
-                # predictions_categ[np.arange(
-                #     scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
+                if self.config["classifier"] == "pairwise_margin_na":
+                    # prediction from "Classifying Relations by Ranking with Convolutional Neural Networks""
+                    predictions = np.zeros_like(scores)  # (num_test, R + 1)
+                    predictions_categ = np.zeros_like(
+                        scores[:, :-1])  # (num_test, R)
+                    predictions_categ[np.arange(
+                        scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
 
-                # (num_test, )
-                # predictions = np.where((scores[:, :-1] > 0).sum(
-                #     1)[:, None] > 0, predictions_categ, np.zeros_like(predictions_categ))
+                    # if none of the scores above zero, prediction will be NA
+                    # (num_test, R), predicts NA if prediction[:, :-1] is all-zero
+                    predictions = np.where((scores[:, :-1] > 0).sum(
+                        1)[:, None] > 0, predictions_categ, np.zeros_like(predictions_categ))
+
+                else:
+                    predictions = np.zeros_like(scores)  # (num_test, R + 1)
+                    predictions[np.arange(scores.shape[0]),
+                                np.argmax(scores, 1)] = 1
+
+                    # (num_test, R), predicts NA if prediction[:, :-1] is all-zero
+                    predictions = predictions[:, :-1]
+
+                    predictions_categ = np.zeros_like(scores)[:, :-1]
+                    predictions_categ[np.arange(
+                        scores.shape[0]), np.argmax(scores[:, :-1], 1)] = 1
 
             results = self.calculate_metrics(
                 predictions, predictions_categ, labels)
@@ -645,4 +709,85 @@ class Trainer(object):
         for i, rel_name in self.data.relation_name.items():
             per_rel_perf[rel_name] = [results["per_rel_p"][i],
                                       results["per_rel_r"][i], results["per_rel_f"][i], threshold_vec[i]]
-        return macro_perf, micro_perf, results["categ_acc"], categ_macro_perf, results["na_acc"], not_na_perf, na_perf, per_rel_perf
+
+        # for each relation, find top 100 docs that are false positive and have largest scores.
+        rel2docs = {}
+        for r in range(len(self.data.relation_map)):
+            label_r = labels[:, r]  # (num_test)
+            score_r = scores[:, r]  # (num_test)
+            predict_r = predictions[:, r]  # (num_test)
+            new_score_r = np.where(predict_r != label_r,
+                                   score_r, - 1e8 * np.ones_like(score_r))
+            sorted_ids = np.argsort(new_score_r)[::-1][:100]
+            rel2docs[self.data.relation_name[r]] = [
+                (docids[i], score_r[i]) for i in list(sorted_ids)]
+
+        if test_mode == True:
+            fout_json["false_positives"] = rel2docs
+            fout.write(json.dumps(fout_json, indent="\t"))
+            fout.close()
+
+        return macro_perf, micro_perf, results["categ_acc"], categ_macro_perf, results["na_acc"], not_na_perf, na_perf, per_rel_perf, vectors, labels, predictions, rel2docs
+
+    def calculate_centers(self, label2train):
+        # label2train: dictionary
+        # Infer scores for valid/test data
+        relation_mat = np.zeros(
+            (len(label2train), int(self.config["dim"])))  # R, D
+
+        with torch.no_grad():
+            for label, data in label2train.items():
+                if label in self.data.relation_map:
+                    labelid = self.data.relation_map[label]
+                else:
+                    continue
+                vectors = np.zeros((len(data), self.config["dim"]))
+                input_array, pad_array, label_array, e1_indicators, e2_indicators, docid, e1id, e2id, input_lengths = [
+                ], [], [], [], [], [], [], [], []
+                for i, dict_ in enumerate(data):
+                    input_array.append(dict_["input"])
+                    pad_array.append(dict_["pad"])
+                    label_array.append(dict_["label_vector"])
+                    e1_indicators.append(dict_["e1_indicators"])
+                    e2_indicators.append(dict_["e2_indicators"])
+                    docid.append(dict_["docid"])
+                    e1id.append(dict_["e1"])
+                    e2id.append(dict_["e2"])
+                    input_lengths.append(dict_["input_length"])
+
+                    if len(input_array) == self.config["test_batch_size"] or i == len(data) - 1:
+
+                        max_length = np.max(input_lengths)
+                        input_ids = torch.tensor(
+                            np.array(input_array)[:, :max_length], dtype=torch.long).to(self.device)
+                        token_type_ids = torch.zeros_like(
+                            input_ids[:, :max_length], dtype=torch.long).to(self.device)
+                        attention_mask = torch.tensor(
+                            np.array(pad_array)[:, :max_length], dtype=torch.long).to(self.device)
+                        e1_indicator = torch.tensor(
+                            np.array(e1_indicators)[:, :max_length], dtype=torch.float).to(self.device)
+                        e2_indicator = torch.tensor(
+                            np.array(e2_indicators)[:, :max_length], dtype=torch.float).to(self.device)
+
+                        ep_mask = np.full(
+                            (len(input_array), self.data.max_text_length, self.data.max_text_length), -1e20)
+                        ep_outer = 1 - \
+                            np.outer(e1_indicators[0], e2_indicators[0])
+                        ep_mask[0] = ep_mask[0] * ep_outer
+                        ep_mask = torch.tensor(
+                            ep_mask[:, :max_length, :max_length], dtype=torch.float).to(self.device)
+
+                        _, vector = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                                               e1_indicator, e2_indicator)  # (b, R) or (b, R+1)
+                        vector = vector.detach().cpu().numpy()
+                        vectors[(i+1-len(input_array)):(i+1), :] = vector
+
+                        input_array, pad_array, label_array, e1_indicators, e2_indicators, docid, e1id, e2id, input_lengths = [
+                        ], [], [], [], [], [], [], [], []
+
+                average_vector = np.mean(vectors, axis=0)
+                average_vector = average_vector / \
+                    np.linalg.norm(average_vector, ord=2)
+                relation_mat[int(labelid)] = average_vector
+        self.logger.info("recalculated centers")
+        return relation_mat

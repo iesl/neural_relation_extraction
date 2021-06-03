@@ -296,6 +296,17 @@ class Dataloader(object):
                 for rel_name in per_rel_stat:
                     self.logger.info(f"          {rel_name}: # of labels = {per_rel_stat[rel_name]}")
                 self.logger.info(f"=======================================")
+
+                self.label2train = {}  # for re-calculating centers
+                for data in self.train:
+                    rels = data["label_names"]
+                    for r in rels:
+                        if r == "no_relation":
+                            continue
+                        if r not in self.label2train:
+                            self.label2train[r] = []
+                        self.label2train[r].append(data)
+
                 # except:
                 #    pass
         with open(data_path + "/valid.json") as f:

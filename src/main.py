@@ -44,6 +44,12 @@ class IntOrPercent(click.ParamType):
     help="enable/disable training",
 )
 @click.option(
+    "--full_annotation / --partial_annotation",
+    default=True,
+    help="full_annotation means all unlabeled pairs indicate no relation; "
+    + "partial_annotation means we don't train or evaluate on unlabeled pairs."
+)
+@click.option(
     "--data_path",
     type=click.Path(),
     default="data/",
@@ -68,11 +74,20 @@ class IntOrPercent(click.ParamType):
 @click.option(
     "--score_func",
     type=click.Choice(
-        ["biaffine", "nn", "box"],
+        ["biaffine", "dot", "cosine", "box"],
         case_sensitive=False,
     ),
     default="biaffine",
-    help="aggregation layer of multiple mentions",
+    help="score function",
+)
+@click.option(
+    "--classifier",
+    type=click.Choice(
+        ["softmax", "softmax_margin", "pairwise_margin", "pairwise_margin_na"],
+        case_sensitive=False,
+    ),
+    default="softmax",
+    help="type of classifiers, ignored when multi_label is True",
 )
 @click.option(
     "--multi_label / --multi_class",
@@ -80,43 +95,28 @@ class IntOrPercent(click.ParamType):
     help="multi_label allows multiple labels during inference; multi_class only allow one label"
 )
 @click.option(
-    "--na_mode",
-    type=click.Choice(
-        ["0", "1", "2", "3", "4"],
-        case_sensitive=False,
-    ),
-    default="0",
-    help="na_mode"
-    + "0: na as a vector / box"
-    + "1: has a binary classifier on top for no_relation detection, and then cascade another layer of softmax"
-    + "2: hardcoded constraint that type box should be inside not_na box (will be equivalent to 2 for nn / biaffine)"
-    + "3: regularizing type boxes to be inside not_na box (will be equivalent to 2 for nn / biaffine)"
-    + "4: 2 + 3 (will be equivalent to 2 for nn / biaffine)"
-    + "(ignored when --multi_label is set)"
-)
-@click.option(
-    "--categorical_weight",
+    "--rescale_factor",
     type=float,
-    default=0.01,
-    help="weight of categorical classifier (w/o NA) loss term, ignore if na_mode == 0"
+    default=1,
+    help="scaling factor of scores to yield better performance (especially for cosine score)"
 )
 @click.option(
-    "--na_weight",
+    "--margin",
     type=float,
-    default=0.01,
-    help="weight of binary classifier (exist a relation or not) loss term, ignore if na_mode == 0"
+    default=0,
+    help="margin in softmax between positive and negative scores"
 )
 @click.option(
-    "--na_box_weight",
+    "--margin_pos",
     type=float,
-    default=0.01,
-    help="weight for let not_na box to contain other relation boxes, ignored if score_func != box or na_mode not 3, 4"
+    default=0,
+    help="margin in pairwise margin classifier for positive scores and zero"
 )
 @click.option(
-    "--full_annotation / --partial_annotation",
-    default=True,
-    help="full_annotation means all unlabeled pairs indicate no relation; "
-    + "partial_annotation means we don't train or evaluate on unlabeled pairs."
+    "--margin_neg",
+    type=float,
+    default=0,
+    help="margin in pairwise margin classifier for positive scores and zero"
 )
 @click.option(
     "--train_batch_size",
@@ -169,6 +169,12 @@ class IntOrPercent(click.ParamType):
     help="dropout rate",
 )
 @click.option(
+    "--max_grad_norm",
+    type=float,
+    default=1.0,
+    help="gradient norm clip (default 1.0)",
+)
+@click.option(
     "--volume_temp",
     type=float,
     default=1.0,
@@ -179,12 +185,6 @@ class IntOrPercent(click.ParamType):
     type=float,
     default=1e-3,
     help="intersection temp for box (default 1e-3)",
-)
-@click.option(
-    "--max_grad_norm",
-    type=float,
-    default=1.0,
-    help="gradient norm clip (default 1.0)",
 )
 @click.option("--epochs", type=int, default=5, help="number of epochs to train")
 @click.option(
@@ -206,30 +206,6 @@ class IntOrPercent(click.ParamType):
     default=-1.0,
     help="number of examples or percentage of training examples for warm up training "
     "(default: -1.0, no warmup, constant learning rate",
-)
-@click.option(
-    "--lambda",
-    type=float,
-    default=2.0,
-    help="",
-)
-@click.option(
-    "--m_pos",
-    type=float,
-    default=2.5,
-    help="",
-)
-@click.option(
-    "--m_neg",
-    type=float,
-    default=0.5,
-    help="",
-)
-@click.option(
-    "--seed",
-    type=int,
-    default=0,
-    help="seed for random number generator",
 )
 @click.option(
     "--cuda / --no_cuda",
@@ -269,8 +245,8 @@ def main(**config):
     else:
         best_metric_threshold = trainer.load_model()
         trainer.model.eval()
-        macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf = trainer.test(
-            test=True, best_metric_threshold=best_metric_threshold)
+        macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf, _, _, _, _ = trainer.test(
+            test_mode=True, best_metric_threshold=best_metric_threshold)
         trainer.local_logging(micro_perf, macro_perf, categ_acc, categ_macro_perf,
                               na_acc, not_na_perf, na_perf, per_rel_perf, 0, label="TEST")
 
