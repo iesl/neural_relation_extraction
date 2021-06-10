@@ -145,13 +145,15 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
         else:
             startid = max_length - 1
 
-        entity_indicator[entity["id"]][startid] = 1
+        #entity_indicator[entity["id"]][startid] = 1
 
         if entity["end"] + cls_token_length in ind_map:
             endid = ind_map[entity["end"] + cls_token_length]
             endid += 1
         else:
             endid = max_length - 1
+
+        entity_indicator[entity["id"]][startid:endid] = 1
         #print(text_tokenized[startid], input_array[startid], startid)
         # sys.stdout.flush()
 
@@ -297,15 +299,15 @@ class Dataloader(object):
                     self.logger.info(f"          {rel_name}: # of labels = {per_rel_stat[rel_name]}")
                 self.logger.info(f"=======================================")
 
-                self.label2train = {}  # for re-calculating centers
-                for data in self.train:
-                    rels = data["label_names"]
-                    for r in rels:
-                        if r == "no_relation":
-                            continue
-                        if r not in self.label2train:
-                            self.label2train[r] = []
-                        self.label2train[r].append(data)
+                #self.label2train = {}  # for re-calculating centers
+                #for data in self.train:
+                #    rels = data["label_names"]
+                #    for r in rels:
+                #        if r == "no_relation":
+                #            continue
+                #        if r not in self.label2train:
+                #            self.label2train[r] = []
+                #        self.label2train[r].append(data)
 
                 # except:
                 #    pass

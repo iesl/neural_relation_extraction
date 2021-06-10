@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 
-def config_generation(score_func, classifier, path, task, data_format):
+def config_generation(batchsize, score_func, classifier, path, task, data_format, contrastive, perturb):
 
     sweep_config = {
         # "controller": {"type": "local"},
@@ -31,7 +31,7 @@ def config_generation(score_func, classifier, path, task, data_format):
             "--encoder_type=roberta-large",
             "--score_func=" + score_func,
             "--classifier=" + classifier,
-            "--train_batch_size=2",
+            "--train_batch_size=" + str(batchsize),
             "--test_batch_size=16",
             "--patience=5",
             "--log_interval=0.25",
@@ -56,51 +56,58 @@ def config_generation(score_func, classifier, path, task, data_format):
 
     if task == "--multi_class":
 
-        if score_func != "cosine" and classifier == "softmax_margin":
-            sweep_config["parameters"]["margin"] = {
-                "distribution": "uniform",
-                "min": 0.0,
-                "max": 10.0}
+        if score_func != "cosine":
+            if classifier == "softmax_margin":
+                sweep_config["parameters"]["margin"] = {
+                    "distribution": "uniform",
+                    "min": 0.0,
+                    "max": 10.0}
 
-        elif score_func != "cosine" and classifier in ["pairwise_margin", "pairwise_margin_na"]:
-            sweep_config["parameters"]["margin_pos"] = {
-                "distribution": "uniform",
-                "min": 0.0,
-                "max": 10.0}
-            sweep_config["parameters"]["margin_neg"] = {
-                "distribution": "uniform",
-                "min": 0.0,
-                "max": 10.0}
+            elif classifier in ["pairwise_margin", "pairwise_margin_na"]:
+                sweep_config["parameters"]["margin_pos"] = {
+                    "distribution": "uniform",
+                    "min": 0.0,
+                    "max": 10.0}
+                sweep_config["parameters"]["margin_neg"] = {
+                    "distribution": "uniform",
+                    "min": 0.0,
+                    "max": 10.0}
 
-        elif score_func == "cosine" and classifier == "softmax":
+        elif score_func == "cosine":
             sweep_config["parameters"]["rescale_factor"] = {
-                "distribution": "uniform",
-                "min": 1,
-                "max": 200}
+                "distribution": "log_uniform",
+                "min": 0,
+                "max": 6.9}
 
-        elif score_func == "cosine" and classifier == "softmax_margin":
-            sweep_config["parameters"]["rescale_factor"] = {
-                "distribution": "uniform",
-                "min": 1,
-                "max": 200}
-            sweep_config["parameters"]["margin"] = {
-                "distribution": "uniform",
-                "min": 0.0,
-                "max": 0.5}
+            if classifier == "softmax_margin":
+                sweep_config["parameters"]["margin"] = {
+                    "distribution": "uniform",
+                    "min": 0.0,
+                    "max": 0.5}
 
-        elif score_func == "cosine" and classifier in ["pairwise_margin", "pairwise_margin_na"]:
-            sweep_config["parameters"]["rescale_factor"] = {
-                "distribution": "uniform",
-                "min": 1,
-                "max": 200}
-            sweep_config["parameters"]["margin_pos"] = {
-                "distribution": "uniform",
-                "min": 0.0,
-                "max": 0.5}
-            sweep_config["parameters"]["margin_neg"] = {
-                "distribution": "uniform",
-                "min": 0.0,
-                "max": 0.5}
+            if classifier in ["pairwise_margin", "pairwise_margin_na"]:
+                sweep_config["parameters"]["margin_pos"] = {
+                    "distribution": "uniform",
+                    "min": 0.0,
+                    "max": 0.5}
+                sweep_config["parameters"]["margin_neg"] = {
+                    "distribution": "uniform",
+                    "min": 0.0,
+                    "max": 0.5}
+
+    if contrastive == True:
+
+        sweep_config["parameters"]["contrastive_weight"] = {
+            "distribution": "uniform",
+            "min": 0.0,
+            "max": 1.0}
+
+    if perturb == True:
+
+        sweep_config["parameters"]["perturb_weight"] = {
+            "distribution": "uniform",
+            "min": 0.0,
+            "max": 1.0}
 
     if score_func == "box":
         sweep_config["parameters"]["intersection_temp"] = {
@@ -126,8 +133,8 @@ def main(config):
         data_format = "--full_annotation"
     else:
         data_format = "--partial_annotation"
-    sweep_config = config_generation(score_func=config.score_func, classifier=config.classifier,
-                                     path=config.data_path, task=task, data_format=data_format)
+    sweep_config = config_generation(batchsize=config.batchsize, score_func=config.score_func, classifier=config.classifier,
+                                     path=config.data_path, task=task, data_format=data_format, contrastive=config.contrastive, perturb=config.perturb)
     sweep_id = wandb.sweep(sweep_config, project="re")
     os.system(f"sh bin/launch_train_sweep.sh dongxu/re/{sweep_id} {config.partition} {config.max_run} {config.num_machine-1} {config.memory_per_run}")
 
@@ -148,6 +155,9 @@ if __name__ == "__main__":
                         action='store_true', default=False)
     parser.add_argument("--score_func", type=str, default="dot")
     parser.add_argument("--classifier", type=str, default="softmax")
+    parser.add_argument("--contrastive", action='store_true', default=False)
+    parser.add_argument("--perturb", action='store_true', default=False)
+    parser.add_argument("--batchsize", type=int, default=2)
     config = parser.parse_args()
     if config.score_func not in [
         "box",

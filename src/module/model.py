@@ -146,8 +146,18 @@ class ConcatNonLinear(nn.Module):
         h = self.encoder(input_ids=input_ids.long(), token_type_ids=token_type_ids.long(
         ), attention_mask=attention_mask.long())[0]  # (batchsize, text_length, D)
 
-        e1_vec = (h * e1_indicator[:, :, None]).max(1)[0]  # (batchsize, D)
-        e2_vec = (h * e2_indicator[:, :, None]).max(1)[0]  # (batchsize, D)
+        # e1_vec = (h * e1_indicator[:, :, None]).max(1)[0]  # (batchsize, D)
+        # e2_vec = (h * e2_indicator[:, :, None]).max(1)[0]  # (batchsize, D)
+
+        e1_indicator_mask = 1000 * \
+            torch.ones_like(e1_indicator) * (1 - e1_indicator)
+        e2_indicator_mask = 1000 * \
+            torch.ones_like(e2_indicator) * (1 - e2_indicator)
+        e1_vec = (h * e1_indicator[:, :, None] -
+                  e1_indicator_mask[:, :, None]).max(1)[0]  # (batchsize, D)
+        e2_vec = (h * e2_indicator[:, :, None] -
+                  e2_indicator_mask[:, :, None]).max(1)[0]  # (batchsize, D)
+
         e1e2_vec = self.dropout(
             self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1))))
         pairwise_scores = self.layer2(e1e2_vec)  # (batchsize, R+1)
@@ -189,8 +199,18 @@ class ConcatNonLinearNormalized(nn.Module):
         h = self.encoder(input_ids=input_ids.long(), token_type_ids=token_type_ids.long(
         ), attention_mask=attention_mask.long())[0]  # (batchsize, text_length, D)
 
-        e1_vec = (h * e1_indicator[:, :, None]).max(1)[0]  # (batchsize, D)
-        e2_vec = (h * e2_indicator[:, :, None]).max(1)[0]  # (batchsize, D)
+        # e1_vec = (h * e1_indicator[:, :, None]).max(1)[0]  # (batchsize, D)
+        # e2_vec = (h * e2_indicator[:, :, None]).max(1)[0]  # (batchsize, D)
+
+        e1_indicator_mask = 1000 * \
+            torch.ones_like(e1_indicator) * (1 - e1_indicator)
+        e2_indicator_mask = 1000 * \
+            torch.ones_like(e2_indicator) * (1 - e2_indicator)
+        e1_vec = (h * e1_indicator[:, :, None] -
+                  e1_indicator_mask[:, :, None]).max(1)[0]  # (batchsize, D)
+        e2_vec = (h * e2_indicator[:, :, None] -
+                  e2_indicator_mask[:, :, None]).max(1)[0]  # (batchsize, D)
+
         e1e2_vec = self.dropout(
             self.relu(self.layer1(torch.cat([e1_vec, e2_vec], 1))))  # batchsize, D
         # normalization

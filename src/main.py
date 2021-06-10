@@ -119,6 +119,18 @@ class IntOrPercent(click.ParamType):
     help="margin in pairwise margin classifier for positive scores and zero"
 )
 @click.option(
+    "--contrastive_weight",
+    type=float,
+    default=0.0,
+    help="weight of loss term for dropout-based contrastive learning"
+)
+@click.option(
+    "--perturb_weight",
+    type=float,
+    default=0.0,
+    help="weight of loss term for entity marker perturbation"
+)
+@click.option(
     "--train_batch_size",
     type=int,
     default=2,
@@ -221,6 +233,17 @@ class IntOrPercent(click.ParamType):
     "--save_embedding / --not_save_embedding",
     default=False,
     help="enable / disable to save sentence embeddings for dev set and relation matrix",
+)
+@click.option(
+    "--deepspeed",
+    default="",
+    help="path to deepspeed config",
+)
+@click.option(
+    "--local_rank",
+    type=int,
+    default=-1,
+    help="Rank of the process during distributed training",
 )
 def main(**config):
 

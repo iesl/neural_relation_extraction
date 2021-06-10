@@ -214,15 +214,66 @@ class Trainer(object):
             ep_mask = ep_mask.to(self.device)
             e1_indicator = e1_indicator.to(self.device)
             e2_indicator = e2_indicator.to(self.device)
-            scores, _ = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
-                                   e1_indicator, e2_indicator)  # (batchsize, R) or (batchsize, R+1)
-            if self.config["multi_label"] == True:
-                loss = loss_func(scores, label_array.to(self.device))
-            else:
-                # (batchsize,)
-                loss = loss_func(scores, label_array.to(self.device))
+            scores, e1e2_vec = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                                          e1_indicator, e2_indicator)  # (batchsize, R) or (batchsize, R+1); (batchsize, dim)
 
+            loss = loss_func(scores, label_array.to(self.device))
+
+            if self.config["contrastive_weight"] > 0.0 or self.config["perturb_weight"] > 0.0:
+                _, e1e2_vec2 = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                                          e1_indicator, e2_indicator)  # (batchsize, dim)
+
+            """contrastive loss"""
+            if self.config["contrastive_weight"] > 0.0:
+                # _, e1e2_vec2 = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                #                           e1_indicator, e2_indicator)  # (batchsize, dim)
+                positive_scores = torch.sum(
+                    e1e2_vec * e1e2_vec2, dim=1)  # (batchsize, )
+                # (batchsize, batchsize)
+                all_scores = torch.mm(e1e2_vec, e1e2_vec2.T)
+                contrastive_loss = - self.config["rescale_factor"] * positive_scores + \
+                    torch.logsumexp(
+                        self.config["rescale_factor"] * all_scores, dim=1)  # (batchsize,)
+                contrastive_loss = contrastive_loss.mean()
+
+                contrastive_loss *= self.config["contrastive_weight"]
+                loss += contrastive_loss
+
+            """perturbation loss"""
+            if self.config["perturb_weight"] > 0.0:
+                #e1_indicator_pos = self.small_perturb_offset(e1_indicator)
+                #e2_indicator_pos = self.small_perturb_offset(e2_indicator)
+                subj_obj_selector = torch.rand(
+                    e1_indicator.shape[0], 1).to(self.device)
+                e1_indicator_neg = torch.where(
+                    subj_obj_selector > 0.5, self.large_perturb_offset(e1_indicator), e1_indicator)
+                e2_indicator_neg = torch.where(
+                    subj_obj_selector <= 0.5, self.large_perturb_offset(e2_indicator), e2_indicator)
+
+                # _, e1e2_vec_pos = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                #                             e1_indicator_pos, e2_indicator_pos)  # (batchsize, R) or (batchsize, R+1)
+                _, e1e2_vec_neg = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                                             e1_indicator_neg, e2_indicator_neg)  # (batchsize, R) or (batchsize, R+1)
+
+                # positive_sim = torch.sum(
+                #    e1e2_vec * e1e2_vec_pos, dim=1)  # (batchsize, )
+                positive_sim = torch.sum(
+                    e1e2_vec * e1e2_vec2, dim=1)  # (batchsize, )
+                negative_sim = torch.sum(e1e2_vec * e1e2_vec_neg, dim=1)
+
+                #print(contrastive_loss, positive_sim, negative_sim)
+                perturb_loss = - self.config["rescale_factor"] * positive_sim + torch.logsumexp(
+                    self.config["rescale_factor"] * torch.stack([positive_sim, negative_sim]), dim=0)  # (batchsize,)
+                perturb_loss = perturb_loss.mean()
+
+                # perturb_loss =  torch.nn.functional.softplus(self.config["rescale_factor"] * (
+                #     self.config["perturb_margin"] - positive_sim + negative_sim)).mean()
+                perturb_loss *= self.config["perturb_weight"]
+                loss += perturb_loss
+
+            sys.stdout.flush()
             """back prop"""
+
             loss = loss / self.config["grad_accumulation_steps"]
             self.scaler.scale(loss).backward()
 
@@ -247,7 +298,7 @@ class Trainer(object):
             if step % 100 == 0:
                 self.logger.info(
                     f"{i}-th example loss: {np.mean(rolling_loss)}")
-                # print(f"{i}-th example loss: {np.mean(rolling_loss)}")
+                print(f"{i}-th example loss: {np.mean(rolling_loss)}")
                 if self.config["wandb"]:
                     wandb.log({'step': step, 'loss': np.mean(rolling_loss)})
                 rolling_loss = []
@@ -259,11 +310,11 @@ class Trainer(object):
                 self.model.eval()
 
                 # replace relation matrix with the center of instance of same label.
-                if self.config["score_func"] == "cosine":
-                    label_centers = self.calculate_centers(
-                        self.data.label2train)  # R, D; normalized
-                    self.model.relation_mat.data[:, :-1] = torch.tensor(
-                        label_centers).float().T.to(self.device)
+                # if self.config["score_func"] == "cosine":
+                #     label_centers = self.calculate_centers(
+                #         self.data.label2train)  # R, D; normalized
+                #     self.model.relation_mat.data[:, :-1] = torch.tensor(
+                #         label_centers).float().T.to(self.device)
 
                 # per_rel_perf is a list of length of (number of relation types + 1)
                 macro_perf, micro_perf, categ_acc, categ_macro_perf, na_acc, not_na_perf, na_perf, per_rel_perf, valid_vectors, valid_labels, valid_preds, _ = self.test(
@@ -791,3 +842,34 @@ class Trainer(object):
                 relation_mat[int(labelid)] = average_vector
         self.logger.info("recalculated centers")
         return relation_mat
+
+    def small_perturb_offset(self, entity_indicator):
+        # entity_indicator: (batchsize, length)
+        random_matrix = torch.rand(entity_indicator.shape).to(
+            self.device) * entity_indicator
+        selected_index = torch.argmax(random_matrix, dim=1).long()
+        original_index = torch.argmax(entity_indicator, dim=1).long()
+        #print("small perturb index", original_index, "->", selected_index)
+        rows = torch.arange(entity_indicator.shape[0]).to(self.device).long()
+        new_entity_indicator = torch.zeros_like(
+            entity_indicator).to(self.device)
+
+        new_entity_indicator[rows, selected_index] = 1.0
+        return new_entity_indicator
+
+    def large_perturb_offset(self, entity_indicator):
+        # entity_indicator: (batchsize, length)
+        not_entity_indicator = (1 - entity_indicator)
+        not_entity_indicator[:, 0] = 0
+        not_entity_indicator[:, -1] = 0
+        random_matrix = torch.rand(
+            entity_indicator.shape).to(self.device) * not_entity_indicator
+        selected_index = torch.argmax(random_matrix, dim=1).long()
+        original_index = torch.argmax(entity_indicator, dim=1).long()
+        #print("large perturb index", original_index, "->", selected_index)
+        rows = torch.arange(entity_indicator.shape[0]).to(self.device).long()
+        new_entity_indicator = torch.zeros_like(
+            entity_indicator).to(self.device)
+
+        new_entity_indicator[rows, selected_index] = 1.0
+        return new_entity_indicator

@@ -37,6 +37,8 @@ def setup(config):
             "marg_" + str(config["margin"])[:5],
             "margpos_" + str(config["margin_pos"])[:5],
             "margneg_" + str(config["margin_neg"])[:5],
+            "contrastw_" + str(config["contrastive_weight"])[:5],
+            "perturbw_" + str(config["perturb_weight"])[:5],
             "bz_" + str(config["train_batch_size"]),
             "acc_" +
             str(config["grad_accumulation_steps"]),
@@ -70,7 +72,37 @@ def setup(config):
     logger.info("Program started")
     logger.info(config)
 
-    device = cuda_if_available(use_cuda=config["cuda"])
+    if config['deepspeed']:
+        device = cuda_if_available(use_cuda=config["cuda"])
+        # # - must be run very last in arg parsing, since it will use a lot of these settings.
+        # # - must be run before the model is created.
+        # from transformers.integrations import DeepSpeedConfigHF
+
+        # # will be used later by the Trainer (leave self.deepspeed unmodified in case a user relies on it not to be modified)
+        # class seudoclass():
+        #     def __init__(self, deepspeed):
+        #         self.deepspeed = deepspeed
+        # seudo = seudoclass(config["deepspeed"])
+
+        # deepspeed_config_hf = DeepSpeedConfigHF(seudo)
+
+        # from transformers.integrations import is_deepspeed_available
+
+        # if not is_deepspeed_available():
+        #     raise ImportError(
+        #         "--deepspeed requires deepspeed: `pip install deepspeed`.")
+        # import deepspeed
+
+        # deepspeed.init_distributed()
+
+        # # workaround for setups like notebooks where the launcher can't be used,
+        # # but deepspeed requires a dist env.
+        # # env LOCAL_RANK could be set manually by the user, or via init_distributed if mpi4py is installed
+        # local_rank = int(config["local_rank"])
+
+        # device = torch.device("cuda", local_rank)
+    else:
+        device = cuda_if_available(use_cuda=config["cuda"])
     lowercase = True if "uncased" in config["encoder_type"] else False
 
     # setup tokenizer
