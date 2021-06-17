@@ -35,13 +35,17 @@ def interaction_parser(text, e1, e2, relations):
         while leftpos != -1 and rightpos >= leftpos:
             text_this_layer += text_[:leftpos]
             windows_, text_ = parse_window(text_[(leftpos+1):])
+            for i, win in enumerate(windows_[::-1]):
+                if "co-treated" in win:
+                    text_this_layer += win.replace("co-treated", "")
+                    del windows_[-int(i+1)]
             windows.extend(windows_)
             leftpos = text_.find('[')
             rightpos = text_.find(']')
         text_this_layer += text_[:rightpos]
         if text_this_layer != "":
             windows.append(text_this_layer)
-        return windows, text_[(rightpos+1):] 
+        return windows, text_[(rightpos+1):]
         
     
     rels = []

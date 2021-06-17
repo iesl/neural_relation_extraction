@@ -20,8 +20,15 @@ for line in open(data_path + "/new_ctd/alignment_CTD_PTC.NULL.pubtator"):
 
 pid_list = list(set(pid_list))
 
-fout = open(data_path + "/new_ctd/pid2year.map2","w")
+pid2year = {}
+for line in open(data_path + "/new_ctd/pid2year.map"):
+    l = line.strip().split()
+    if len(l) == 2: pid2year[l[0]] = int(l[1])
+
+fout = open(data_path + "/new_ctd/pid2year.map","a+")
 for pmid in tqdm(pid_list):
+    if pmid in pid2year:
+        continue
     fail_time = 0
     while fail_time < 5:
         try:
