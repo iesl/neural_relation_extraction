@@ -146,8 +146,8 @@ if __name__ == "__main__":
     parser.add_argument("--partition", type=str, default="1080ti-long")
     parser.add_argument("--username", type=str, default="dongxuzhang")
     parser.add_argument("--max_run", type=int, default=50)
-    parser.add_argument("--num_machine", type=int, default=20)
-    parser.add_argument("--memory_per_run", type=int, default=30000)
+    parser.add_argument("--num_machine", type=int, default=30)
+    parser.add_argument("--memory_per_run", type=int, default=25000)
 
     parser.add_argument("--data_path", type=str, default="data/tacred/")
     parser.add_argument("--multi_label", action='store_true', default=False)
@@ -157,7 +157,7 @@ if __name__ == "__main__":
     parser.add_argument("--classifier", type=str, default="softmax")
     parser.add_argument("--contrastive", action='store_true', default=False)
     parser.add_argument("--perturb", action='store_true', default=False)
-    parser.add_argument("--batchsize", type=int, default=2)
+    parser.add_argument("--batchsize", type=int, default=1)
     config = parser.parse_args()
     if config.score_func not in [
         "box",

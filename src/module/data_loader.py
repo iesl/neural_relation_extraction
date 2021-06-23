@@ -3,6 +3,7 @@ import random
 import sys
 import numpy as np
 import torch
+import unidecode
 from tqdm import tqdm
 
 __all__ = [
@@ -48,41 +49,6 @@ def map_index(text, text_tokenized, unk_token):
     return ind_map
 
 
-def map_index_bkup(text, text_tokenized, unk_token):
-    # print(text)
-    # print(text_tokenized)
-    sys.stdout.flush()
-    ind_map = {}
-    i, j = 0, 0
-    src_str, tgt_str = "", ""
-    num_token = len(text_tokenized)
-    while j < num_token:
-        token = text_tokenized[j]
-        if token[:2] == "##":
-            token = token[2:]
-        if token[:1] == "Ġ":
-            token = token[1:]
-        # deal with [UNK] and space. characters of [UNK] will point to next token.
-        if token != text[i:(i+len(token))]:
-            ind_map[i] = j
-            if token == "[UNK]":
-                i += 1
-                j += 1
-            else:
-                i += 1
-        else:
-            tgt_str += token
-            #print("tgt_str", tgt_str)
-            while len(src_str) < len(tgt_str):
-                ind_map[i] = j
-                src_str += text[i]
-                #print("src_str", src_str)
-                sys.stdout.flush()
-                i += 1
-            j += 1
-    return ind_map
-
-
 def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True, full_annotation=True):
     # print(data_entry)
     """convert to index array, cut long sentences, cut long document, pad short sentences, pad short document"""
@@ -92,6 +58,7 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
     cls_token_length = len(cls_token)
 
     docid = data_entry["docid"]
+
     if "title" in data_entry and "abstract" in data_entry:
         text = data_entry["title"] + data_entry["abstract"]
         if lower == True:
@@ -108,9 +75,12 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
     # tokenizer will automatically add cls and sep at the beginning and end of each sentence
     # [CLS] --> 101, [PAD] --> 0, [SEP] --> 102, [UNK] --> 100
 
+    text = unidecode.unidecode(text)
     text_tokenized = tokenizer.tokenize(text)[:(max_text_length-2)]
+
     text_tokenized = [cls_token] + text_tokenized + [sep_token]
     text_wid = tokenizer.convert_tokens_to_ids(text_tokenized)
+
     text = cls_token + " " + text + " " + sep_token
 
     padid = tokenizer.pad_token_id
@@ -128,11 +98,15 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
 
     # create title entity indicator vector and entity type dictionary
 
+    #if docid in ["61b3a65fb99eca31455f", "61b3a65fb983c75b2a4e", "61b3a65fb9639f197fad"]:
+    #    print(text)
+    #    print(text_tokenized)
+    #    print(text_wid)
+
     sys.stdout.flush()
     entity_indicator = {}
     entity_type = {}
     entity_id_set = set([])
-    max_length = len(text_tokenized)
     for entity in entities_info:
         # if entity mention is outside max_text_length, ignore. +6 indicates additional offset due to "[CLS] "
         entity_id_set.add(entity["id"])
@@ -143,7 +117,8 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
         if entity["start"] + cls_token_length in ind_map:
             startid = ind_map[entity["start"] + cls_token_length]
         else:
-            startid = max_length - 1
+            #startid = input_length - 1
+            startid = 0
 
         #entity_indicator[entity["id"]][startid] = 1
 
@@ -151,9 +126,14 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
             endid = ind_map[entity["end"] + cls_token_length]
             endid += 1
         else:
-            endid = max_length - 1
+            #endid = input_length - 1
+            endid = input_length
+
+        if startid >= endid: endid = startid + 1
 
         entity_indicator[entity["id"]][startid:endid] = 1
+        #if docid in ["61b3a65fb99eca31455f", "61b3a65fb983c75b2a4e", "61b3a65fb9639f197fad"]:
+        #    print(text_tokenized[startid:endid])
         #print(text_tokenized[startid], input_array[startid], startid)
         # sys.stdout.flush()
 
@@ -171,6 +151,70 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
             if (e1, e2) not in relations:
                 relations[(e1, e2)] = []
             relations[(e1, e2)].append(rel_type)
+
+    # load perturbation data
+    perturb_output = []
+    if "perturbation" in data_entry and len(data_entry["perturbation"]) > 0:
+        for perturb_data in data_entry["perturbation"]:
+            if "title" in perturb_data and "abstract" in perturb_data:
+                perturb_text = perturb_data["title"] + perturb_data["abstract"]
+                if lower == True:
+                    perturb_text = perturb_text.lower()
+            else:
+                perturb_text = perturb_data["text"]
+                if lower == True:
+                    perturb_text = perturb_text.lower()
+            #text = cls_token + " " + text + " " + sep_token
+            perturb_ent_info = perturb_data["entity"]
+
+            perturb_text_tokenized = tokenizer.tokenize(
+                perturb_text)[:(max_text_length-2)]
+
+            perturb_text_tokenized = [cls_token] + \
+                perturb_text_tokenized + [sep_token]
+            perturb_text_wid = tokenizer.convert_tokens_to_ids(
+                perturb_text_tokenized)
+            perturb_text = cls_token + " " + perturb_text + " " + sep_token
+
+            padid = tokenizer.pad_token_id
+            perturb_input_array = np.ones(max_text_length,
+                                          dtype=np.int) * int(padid)
+            perturb_input_length = len(perturb_text_wid)
+            perturb_input_array[0:len(perturb_text_wid)] = perturb_text_wid
+            perturb_pad_array = np.array(
+                perturb_input_array != padid, dtype=np.long)
+
+            perturb_ind_map = map_index(
+                perturb_text, perturb_text_tokenized, unk_token)
+
+            perturb_entity_indicator = []
+            for entity in perturb_ent_info:
+                # if entity mention is outside max_text_length, ignore. +6 indicates additional offset due to "[CLS] "
+                perturb_entity_indicator.append(np.zeros(max_text_length))
+
+                if entity["start"] + cls_token_length in perturb_ind_map:
+                    startid = perturb_ind_map[entity["start"] +
+                                              cls_token_length]
+                else:
+                    #startid = perturb_input_length - 1
+                    startid = 0
+
+                #entity_indicator[entity["id"]][startid] = 1
+
+                if entity["end"] + cls_token_length in perturb_ind_map:
+                    endid = perturb_ind_map[entity["end"] + cls_token_length]
+                    endid += 1
+                else:
+                    #endid = perturb_input_length - 1
+                    endid = perturb_input_length
+
+                if startid >= endid: endid = startid + 1
+
+                perturb_entity_indicator[-1][startid:endid] = 1
+
+            perturb_output.append({"input": perturb_input_array, "pad": perturb_pad_array, "docid": docid,
+                                   "e1_indicators": perturb_entity_indicator[0], "e2_indicators": perturb_entity_indicator[1],
+                                   "input_length": perturb_input_length})
 
     output_data = []
     sys.stdout.flush()
@@ -195,7 +239,8 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
                                         "e1_indicators": e1_indicators, "e2_indicators": e2_indicators,
                                         "e1": e1, "e2": e2,
                                         "e1_type": entity_type[e1], "e2_type": entity_type[e2],
-                                        "input_length": input_length
+                                        "input_length": input_length,
+                                        "perturbation": [],
                                         })
     else:
         # in this mode, NA relation label occurs only when it is shown in the data
@@ -210,7 +255,8 @@ def preprocess(data_entry, tokenizer, max_text_length, relation_map, lower=True,
                                 "e1_indicators": e1_indicators, "e2_indicators": e2_indicators,
                                 "e1": e1, "e2": e2,
                                 "e1_type": entity_type[e1], "e2_type": entity_type[e2],
-                                "input_length": input_length
+                                "input_length": input_length,
+                                "perturbation": perturb_output
                                 })
             #print(e1, e2, label_names, label_vector)
             sys.stdout.flush()
@@ -271,6 +317,7 @@ class Dataloader(object):
 
         if training == True:
 
+            #with open(data_path + "/train.json", encoding="utf-8") as f:
             with open(data_path + "/train.json") as f:
                 # try:
                 train_json = json.loads(f.read())
@@ -299,8 +346,8 @@ class Dataloader(object):
                     self.logger.info(f"          {rel_name}: # of labels = {per_rel_stat[rel_name]}")
                 self.logger.info(f"=======================================")
 
-                #self.label2train = {}  # for re-calculating centers
-                #for data in self.train:
+                # self.label2train = {}  # for re-calculating centers
+                # for data in self.train:
                 #    rels = data["label_names"]
                 #    for r in rels:
                 #        if r == "no_relation":
@@ -388,8 +435,13 @@ class Dataloader(object):
             batch = self.train[self._idx:(self._idx+self._bz)]
             input_array, pad_array, label_array, ep_mask, e1_indicator, e2_indicator = [
             ], [], [], [], [], []
+            perturb_input_array, perturb_pad_array, perturb_e1_indicator, perturb_e2_indicator = [
+            ], [], [], []
             input_lengths = []
+            perturb_input_lengths = []
+            docids, perturb_docids = [], []
             for b in batch:
+                docids.append(b["docid"])
                 input_lengths.append(b["input_length"])
                 input_array.append(b["input"])
                 pad_array.append(b["pad"])
@@ -414,10 +466,24 @@ class Dataloader(object):
                 # ep_mask_[r, c] = 0.0
                 ep_mask.append(ep_mask_)
 
+                if len(b["perturbation"]) > 0:
+                    perturb_d = random.choice(b["perturbation"])
+                    perturb_input_lengths.append(perturb_d["input_length"])
+                    perturb_input_array.append(perturb_d["input"])
+                    perturb_pad_array.append(perturb_d["pad"])
+                    perturb_e1_indicator.append(perturb_d["e1_indicators"])
+                    perturb_e2_indicator.append(perturb_d["e2_indicators"])
+                    perturb_docids.append(perturb_d["docid"])
+                else:
+                    perturb_input_lengths.append(b["input_length"])
+                    perturb_input_array.append(b["input"])
+                    perturb_pad_array.append(b["pad"])
+                    perturb_e1_indicator.append(b["e1_indicators"])
+                    perturb_e2_indicator.append(b["e2_indicators"])
+
             #print(input_array[0], np.where(ep_mask[0] == 0.0), label_array[0])
             # sys.stdout.flush()
             max_length = int(np.max(input_lengths))
-
             input_ids = torch.tensor(np.array(input_array)[
                                      :, :max_length], dtype=torch.long)
             token_type_ids = torch.zeros_like(
@@ -433,6 +499,21 @@ class Dataloader(object):
             e2_indicator = torch.tensor(np.array(e2_indicator)[
                                         :, :max_length], dtype=torch.float)
 
+            perturb_max_length = int(np.max(perturb_input_lengths))
+            perturb_input_ids = torch.tensor(np.array(perturb_input_array)[
+                :, :perturb_max_length], dtype=torch.long)
+            perturb_token_type_ids = torch.zeros_like(
+                perturb_input_ids[:, :perturb_max_length], dtype=torch.long)
+            perturb_attention_mask = torch.tensor(
+                np.array(perturb_pad_array)[:, :perturb_max_length], dtype=torch.long)
+            perturb_e1_indicator = torch.tensor(np.array(perturb_e1_indicator)[
+                :, :perturb_max_length], dtype=torch.float)
+            perturb_e2_indicator = torch.tensor(np.array(perturb_e2_indicator)[
+                :, :perturb_max_length], dtype=torch.float)
+
             self._idx += self._bz
             self.num_trained_data += self._bz
-            yield self.num_trained_data, (input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator, label_array)
+
+            return_data = (input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator, label_array, docids,
+                           perturb_input_ids, perturb_token_type_ids, perturb_attention_mask, perturb_e1_indicator, perturb_e2_indicator, perturb_docids)
+            yield self.num_trained_data, return_data

@@ -204,7 +204,11 @@ class Trainer(object):
         rolling_loss = []
         max_step = self.config["epochs"] * len(self.data)
         self.model.zero_grad()
-        for i, (input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator, label_array) in iter(self.data):
+        for i, batch in iter(self.data):
+
+            input_ids, token_type_ids, attention_mask, ep_mask, e1_indicator, e2_indicator, label_array, docids, \
+                perturb_input_ids, perturb_token_type_ids, perturb_attention_mask, perturb_e1_indicator, perturb_e2_indicator, perturb_docids = batch
+
             self.model.train(True)
 
             """Loss"""
@@ -241,22 +245,24 @@ class Trainer(object):
 
             """perturbation loss"""
             if self.config["perturb_weight"] > 0.0:
-                #e1_indicator_pos = self.small_perturb_offset(e1_indicator)
-                #e2_indicator_pos = self.small_perturb_offset(e2_indicator)
-                subj_obj_selector = torch.rand(
-                    e1_indicator.shape[0], 1).to(self.device)
-                e1_indicator_neg = torch.where(
-                    subj_obj_selector > 0.5, self.large_perturb_offset(e1_indicator), e1_indicator)
-                e2_indicator_neg = torch.where(
-                    subj_obj_selector <= 0.5, self.large_perturb_offset(e2_indicator), e2_indicator)
+                # subj_obj_selector = torch.rand(
+                #     e1_indicator.shape[0], 1).to(self.device)
+                # e1_indicator_neg = torch.where(
+                #     subj_obj_selector > 0.5, self.large_perturb_offset(e1_indicator), e1_indicator)
+                # e2_indicator_neg = torch.where(
+                #     subj_obj_selector <= 0.5, self.large_perturb_offset(e2_indicator), e2_indicator)
+                # _, e1e2_vec_neg = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
+                #                              e1_indicator_neg, e2_indicator_neg)  # (batchsize, R) or (batchsize, R+1)
 
-                # _, e1e2_vec_pos = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
-                #                             e1_indicator_pos, e2_indicator_pos)  # (batchsize, R) or (batchsize, R+1)
-                _, e1e2_vec_neg = self.model(input_ids, token_type_ids, attention_mask, ep_mask,
-                                             e1_indicator_neg, e2_indicator_neg)  # (batchsize, R) or (batchsize, R+1)
+                perturb_input_ids = perturb_input_ids.to(self.device)
+                perturb_token_type_ids = perturb_token_type_ids.to(self.device)
+                perturb_attention_mask = perturb_attention_mask.to(self.device)
+                perturb_e1_indicator = perturb_e1_indicator.to(self.device)
+                perturb_e2_indicator = perturb_e2_indicator.to(self.device)
 
-                # positive_sim = torch.sum(
-                #    e1e2_vec * e1e2_vec_pos, dim=1)  # (batchsize, )
+                _, e1e2_vec_neg = self.model(perturb_input_ids, perturb_token_type_ids, perturb_attention_mask, None,
+                                             perturb_e1_indicator, perturb_e2_indicator)  # (batchsize, R) or (batchsize, R+1)
+
                 positive_sim = torch.sum(
                     e1e2_vec * e1e2_vec2, dim=1)  # (batchsize, )
                 negative_sim = torch.sum(e1e2_vec * e1e2_vec_neg, dim=1)
@@ -266,8 +272,6 @@ class Trainer(object):
                     self.config["rescale_factor"] * torch.stack([positive_sim, negative_sim]), dim=0)  # (batchsize,)
                 perturb_loss = perturb_loss.mean()
 
-                # perturb_loss =  torch.nn.functional.softplus(self.config["rescale_factor"] * (
-                #     self.config["perturb_margin"] - positive_sim + negative_sim)).mean()
                 perturb_loss *= self.config["perturb_weight"]
                 loss += perturb_loss
 
@@ -275,6 +279,10 @@ class Trainer(object):
             """back prop"""
 
             loss = loss / self.config["grad_accumulation_steps"]
+            #if loss.detach().cpu() > 10:
+            #    print(docids)
+            #    print(e1_indicator)
+            #    print(e2_indicator)
             self.scaler.scale(loss).backward()
 
             for param in self.model.parameters():
