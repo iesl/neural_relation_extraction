@@ -5,7 +5,7 @@ import fastentrypoints
 from setuptools import find_packages, setup
 
 setup(
-    name="recipe_cbr",
+    name="iesl-re",
     version="0.1",
     package_dir={"": "src"},
     description="",

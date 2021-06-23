@@ -1,4 +1,4 @@
-# Biomedical Relation Extraction with Document level distant supervision on CTD and PubMed
+# Relation Extraction with Sentence level / Document level, direct supervision / distant supervision on TACRED / FewRel / CTD + PubMed
 
 Create a new conda enviroment:
 
